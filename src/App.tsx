@@ -1,7 +1,21 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid } from "recharts";
 import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2 } from "lucide-react";
 import * as Papa from "papaparse";
+
+const FINNHUB_API_KEY = "d67t5tpr01qobepj8tb0d67t5tpr01qobepj8tbg";
+
+const fetchFinnhubQuote = async (symbol: string): Promise<{ price: number; change: number; changePct: number } | null> => {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${FINNHUB_API_KEY}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || data.c === 0 || data.c === undefined) return null;
+    return { price: data.c, change: data.d, changePct: data.dp };
+  } catch {
+    return null;
+  }
+};
 
 const ACCOUNT_COLORS: Record<string, { bg: string; text: string; dot: string; light: string }> = {
   Fidelity: { bg: "from-emerald-500 to-teal-600", text: "text-emerald-400", dot: "bg-emerald-400", light: "#34d399" },
@@ -85,6 +99,30 @@ export default function App() {
   const [newPos, setNewPos] = useState({ ticker: "", shares: "", avgCost: "", account: "Fidelity" });
   const fileRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(100);
+  const [dataSource, setDataSource] = useState<"connecting" | "live" | "simulated">("connecting");
+
+  const fetchAllPrices = useCallback(async (tickers: string[]) => {
+    const results = await Promise.all(tickers.map((t) => fetchFinnhubQuote(t)));
+    let anyLive = false;
+    setPrices((prev) => {
+      const updated = { ...prev };
+      tickers.forEach((t, i) => {
+        const quote = results[i];
+        if (quote) {
+          anyLive = true;
+          updated[t] = { current: quote.price, prev: prev[t]?.current ?? quote.price, change: quote.change, changePct: quote.changePct };
+        } else if (updated[t]) {
+          const old = updated[t].current;
+          const newPrice = simulatePrice(old);
+          const change = newPrice - old;
+          updated[t] = { current: newPrice, prev: old, change: updated[t].change + change, changePct: ((newPrice - (old - updated[t].change)) / (old - updated[t].change)) * 100 };
+        }
+      });
+      return updated;
+    });
+    setDataSource(anyLive ? "live" : "simulated");
+    setTick((t) => t + 1);
+  }, []);
 
   // Initialize prices
   useEffect(() => {
@@ -98,25 +136,18 @@ export default function App() {
     });
     setPrices(initial);
     setPriceHistory(histories);
+    // Kick off first live fetch
+    fetchAllPrices(tickers);
   }, []);
 
-  // Simulate live price updates
+  // Refresh prices from Finnhub every 15 seconds, fallback to simulation
   useEffect(() => {
     const interval = setInterval(() => {
-      setPrices((prev) => {
-        const updated = { ...prev };
-        Object.keys(updated).forEach((t) => {
-          const old = updated[t].current;
-          const newPrice = simulatePrice(old);
-          const change = newPrice - old;
-          updated[t] = { current: newPrice, prev: old, change: updated[t].change + change, changePct: ((newPrice - (old - updated[t].change)) / (old - updated[t].change)) * 100 };
-        });
-        return updated;
-      });
-      setTick((t) => t + 1);
-    }, 3000);
+      const tickers = [...new Set(positions.map((p) => p.ticker))];
+      fetchAllPrices(tickers);
+    }, 15000);
     return () => clearInterval(interval);
-  }, []);
+  }, [positions, fetchAllPrices]);
 
   // Ensure new tickers get prices
   useEffect(() => {
@@ -226,7 +257,7 @@ export default function App() {
             📊 My Portfolio Tracker
           </h1>
           <p style={{ color: "#94a3b8", margin: "4px 0 0", fontSize: 13 }}>
-            Live prices update every 3s • <span style={{ color: "#4ade80" }}>●</span> Connected
+            {dataSource === "live" ? "Finnhub live prices" : dataSource === "simulated" ? "Simulated prices (API fallback)" : "Connecting to Finnhub..."} update every 15s • <span style={{ color: dataSource === "live" ? "#4ade80" : dataSource === "simulated" ? "#fbbf24" : "#94a3b8" }}>●</span> {dataSource === "live" ? "Live" : dataSource === "simulated" ? "Simulated" : "..."}
           </p>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
