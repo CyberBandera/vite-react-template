@@ -77,7 +77,7 @@ const defaultPositions: Position[] = [
   { id: 3, ticker: "SAABY", shares: 799, avgCost: 27.16, account: "Chase" },
   { id: 4, ticker: "MU", shares: 43.36685, avgCost: 332.66, account: "Chase" },
   { id: 5, ticker: "VTSAX", shares: 98.233, avgCost: 134.51, account: "Chase" },
-  { id: 6, ticker: "BRKB", shares: 28.10829, avgCost: 486.49, account: "Chase" },
+  { id: 6, ticker: "BRK.B", shares: 28.10829, avgCost: 486.49, account: "Chase" },
   { id: 7, ticker: "QS", shares: 1481.85422, avgCost: 10.24, account: "Chase" },
   { id: 8, ticker: "SNDK", shares: 18, avgCost: 195.94, account: "Chase" },
   { id: 9, ticker: "INTC", shares: 215.92714, avgCost: 41.12, account: "Chase" },
@@ -85,7 +85,7 @@ const defaultPositions: Position[] = [
   { id: 11, ticker: "UAMY", shares: 876, avgCost: 9.03, account: "Chase" },
   { id: 12, ticker: "RNMBY", shares: 17, avgCost: 390.13, account: "Chase" },
   { id: 13, ticker: "AAPL", shares: 22.82144, avgCost: 254.16, account: "Chase" },
-  { id: 14, ticker: "KXIAY", shares: 320, avgCost: 0, account: "Chase" },
+  { id: 14, ticker: "KXIAY", shares: 320, avgCost: 11.68, account: "Chase" },
   { id: 15, ticker: "ASML", shares: 3, avgCost: 1435, account: "Chase" },
   { id: 16, ticker: "LYSDY", shares: 325, avgCost: 13.65, account: "Chase" },
   { id: 17, ticker: "SMERY", shares: 18, avgCost: 181.9, account: "Chase" },
@@ -111,6 +111,11 @@ const savePositions = (positions: Position[]) => {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(positions));
   } catch {}
+};
+
+// Tickers that Finnhub can't quote directly — fetch a proxy symbol instead
+const TICKER_PROXY: Record<string, string> = {
+  VTSAX: "VTI",
 };
 
 const basePrices: Record<string, number> = {
@@ -140,7 +145,7 @@ export default function App() {
   }, [positions]);
 
   const fetchAllPrices = useCallback(async (tickers: string[]) => {
-    const results = await Promise.all(tickers.map((t) => fetchFinnhubQuote(t)));
+    const results = await Promise.all(tickers.map((t) => fetchFinnhubQuote(TICKER_PROXY[t] || t)));
     let anyLive = false;
     setPrices((prev) => {
       const updated = { ...prev };
@@ -465,6 +470,11 @@ export default function App() {
                   <tr key={p.id} style={{ borderBottom: "1px solid #1e293b11", cursor: "pointer", transition: "background 0.15s" }} onClick={() => setSelectedTicker(p.ticker)} onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
                     <td style={{ padding: "12px", fontWeight: 700, color: "#fff" }}>
                       <span style={{ background: "linear-gradient(135deg, #a78bfa33, #f472b633)", padding: "3px 10px", borderRadius: 8, fontSize: 13 }}>{p.ticker}</span>
+                      {TICKER_PROXY[p.ticker] && (
+                        <span title={`Price via ${TICKER_PROXY[p.ticker]}`} style={{ marginLeft: 6, fontSize: 10, color: "#fbbf24", background: "rgba(251,191,36,0.15)", padding: "2px 6px", borderRadius: 6, fontWeight: 600, cursor: "help" }}>
+                          ~{TICKER_PROXY[p.ticker]}
+                        </span>
+                      )}
                     </td>
                     <td style={{ padding: "12px" }}>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
