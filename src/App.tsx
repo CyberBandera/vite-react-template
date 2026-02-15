@@ -3,7 +3,7 @@ import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, Tooltip, Responsive
 import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2 } from "lucide-react";
 import * as Papa from "papaparse";
 
-const FINNHUB_API_KEY = "d67t5tpr01qobepj8tbg";
+const FINNHUB_API_KEY = "d67t5tpr01qobepj8tb0d67t5tpr01qobepj8tbg";
 
 // Tickers that have no Finnhub data — valued at avgCost only
 const MANUAL_TICKERS = new Set(["VTSAX"]);
