@@ -5,30 +5,35 @@ import * as Papa from "papaparse";
 
 const FINNHUB_API_KEY = "d67t5tpr01qobepj8tb0d67t5tpr01qobepj8tbg";
 
-// Tickers that have no Finnhub data — valued at avgCost only
-const MANUAL_TICKERS = new Set(["VTSAX"]);
-
-// Price divisors for tickers with unprocessed splits on Finnhub
-const PRICE_DIVISORS: Record<string, number> = {
-  KXIAY: 10,
+// Map display tickers to Finnhub API symbols when they differ
+const FINNHUB_SYMBOLS: Record<string, string> = {
+  BRKB: "BRK.B",
+  VTSAX: "VTI",
 };
 
-const fetchFinnhubQuote = async (symbol: string): Promise<{ price: number; change: number; changePct: number } | null> => {
+// Multiply Finnhub price to approximate the display ticker's actual price
+const PRICE_MULTIPLIERS: Record<string, number> = {
+  VTSAX: 0.487,
+  KXIAY: 0.1, // 10:1 split not yet reflected on Finnhub
+};
+
+const fetchFinnhubQuote = async (displayTicker: string): Promise<{ price: number; change: number; changePct: number } | null> => {
+  const apiSymbol = FINNHUB_SYMBOLS[displayTicker] || displayTicker;
   try {
-    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${FINNHUB_API_KEY}`);
+    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(apiSymbol)}&token=${FINNHUB_API_KEY}`);
     if (!res.ok) {
-      console.warn(`[Finnhub] ${symbol}: HTTP ${res.status}`);
+      console.warn(`[Finnhub] ${displayTicker} (${apiSymbol}): HTTP ${res.status}`);
       return null;
     }
     const data = await res.json();
     if (!data || data.c === 0 || data.c === undefined) {
-      console.warn(`[Finnhub] ${symbol}: no price data`, data);
+      console.warn(`[Finnhub] ${displayTicker} (${apiSymbol}): no price data`, data);
       return null;
     }
-    const divisor = PRICE_DIVISORS[symbol] || 1;
-    return { price: data.c / divisor, change: data.d / divisor, changePct: data.dp };
+    const mult = PRICE_MULTIPLIERS[displayTicker] || 1;
+    return { price: data.c * mult, change: data.d * mult, changePct: data.dp };
   } catch (err) {
-    console.error(`[Finnhub] ${symbol}: fetch error`, err);
+    console.error(`[Finnhub] ${displayTicker} (${apiSymbol}): fetch error`, err);
     return null;
   }
 };
@@ -93,7 +98,7 @@ const defaultPositions: Position[] = [
   { id: 3, ticker: "SAABY", shares: 799, avgCost: 27.16, account: "Chase" },
   { id: 4, ticker: "MU", shares: 43.36685, avgCost: 332.66, account: "Chase" },
   { id: 5, ticker: "VTSAX", shares: 98.233, avgCost: 134.51, account: "Chase" },
-  { id: 6, ticker: "BRK.B", shares: 28.10829, avgCost: 486.49, account: "Chase" },
+  { id: 6, ticker: "BRKB", shares: 28.10829, avgCost: 486.49, account: "Chase" },
   { id: 7, ticker: "QS", shares: 1481.85422, avgCost: 10.24, account: "Chase" },
   { id: 8, ticker: "SNDK", shares: 18, avgCost: 195.94, account: "Chase" },
   { id: 9, ticker: "INTC", shares: 215.92714, avgCost: 41.12, account: "Chase" },
@@ -156,12 +161,11 @@ export default function App() {
   }, [positions]);
 
   const fetchAllPrices = useCallback(async (tickers: string[]) => {
-    const fetchable = tickers.filter((t) => !MANUAL_TICKERS.has(t));
-    const results = await Promise.all(fetchable.map((t) => fetchFinnhubQuote(t)));
+    const results = await Promise.all(tickers.map((t) => fetchFinnhubQuote(t)));
     let anyLive = false;
     setPrices((prev) => {
       const updated = { ...prev };
-      fetchable.forEach((t, i) => {
+      tickers.forEach((t, i) => {
         const quote = results[i];
         if (quote) {
           anyLive = true;
@@ -175,7 +179,7 @@ export default function App() {
       });
       return updated;
     });
-    if (fetchable.length > 0) setDataSource(anyLive ? "live" : "simulated");
+    setDataSource(anyLive ? "live" : "simulated");
     setTick((t) => t + 1);
   }, []);
 
@@ -185,16 +189,9 @@ export default function App() {
     const initial: Record<string, PriceData> = {};
     const histories: Record<string, { date: string; price: number }[]> = {};
     tickers.forEach((t) => {
-      if (MANUAL_TICKERS.has(t)) {
-        const pos = positions.find((p) => p.ticker === t);
-        const base = pos?.avgCost || 0;
-        initial[t] = { current: base, prev: base, change: 0, changePct: 0 };
-        histories[t] = generatePriceHistory(base);
-      } else {
-        const base = basePrices[t] || 100 + Math.random() * 400;
-        initial[t] = { current: base, prev: base, change: 0, changePct: 0 };
-        histories[t] = generatePriceHistory(base);
-      }
+      const base = basePrices[t] || 100 + Math.random() * 400;
+      initial[t] = { current: base, prev: base, change: 0, changePct: 0 };
+      histories[t] = generatePriceHistory(base);
     });
     setPrices(initial);
     setPriceHistory(histories);
@@ -202,12 +199,12 @@ export default function App() {
     fetchAllPrices(tickers);
   }, []);
 
-  // Refresh prices from Finnhub every 15 seconds, fallback to simulation
+  // Refresh prices from Finnhub every 5 seconds, fallback to simulation
   useEffect(() => {
     const interval = setInterval(() => {
       const tickers = [...new Set(positions.map((p) => p.ticker))];
       fetchAllPrices(tickers);
-    }, 15000);
+    }, 5000);
     return () => clearInterval(interval);
   }, [positions, fetchAllPrices]);
 
@@ -319,7 +316,7 @@ export default function App() {
             📊 My Portfolio Tracker
           </h1>
           <p style={{ color: "#94a3b8", margin: "4px 0 0", fontSize: 13 }}>
-            {dataSource === "live" ? "Finnhub live prices" : dataSource === "simulated" ? "Simulated prices (API fallback)" : "Connecting to Finnhub..."} update every 15s • <span style={{ color: dataSource === "live" ? "#4ade80" : dataSource === "simulated" ? "#fbbf24" : "#94a3b8" }}>●</span> {dataSource === "live" ? "Live" : dataSource === "simulated" ? "Simulated" : "..."}
+            {dataSource === "live" ? "Finnhub live prices" : dataSource === "simulated" ? "Simulated prices (API fallback)" : "Connecting to Finnhub..."} update every 5s • <span style={{ color: dataSource === "live" ? "#4ade80" : dataSource === "simulated" ? "#fbbf24" : "#94a3b8" }}>●</span> {dataSource === "live" ? "Live" : dataSource === "simulated" ? "Simulated" : "..."}
           </p>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
@@ -489,11 +486,6 @@ export default function App() {
                   <tr key={p.id} style={{ borderBottom: "1px solid #1e293b11", cursor: "pointer", transition: "background 0.15s" }} onClick={() => setSelectedTicker(p.ticker)} onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
                     <td style={{ padding: "12px", fontWeight: 700, color: "#fff" }}>
                       <span style={{ background: "linear-gradient(135deg, #a78bfa33, #f472b633)", padding: "3px 10px", borderRadius: 8, fontSize: 13 }}>{p.ticker}</span>
-                      {MANUAL_TICKERS.has(p.ticker) && (
-                        <span title="No live data — using cost basis" style={{ marginLeft: 6, fontSize: 10, color: "#94a3b8", background: "rgba(148,163,184,0.15)", padding: "2px 6px", borderRadius: 6, fontWeight: 600, cursor: "help" }}>
-                          manual
-                        </span>
-                      )}
                     </td>
                     <td style={{ padding: "12px" }}>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
