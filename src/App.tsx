@@ -3,16 +3,32 @@ import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, Tooltip, Responsive
 import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2 } from "lucide-react";
 import * as Papa from "papaparse";
 
-const FINNHUB_API_KEY = "d67t5tpr01qobepj8tb0d67t5tpr01qobepj8tbg";
+const FINNHUB_API_KEY = "d67t5tpr01qobepj8tbg";
+
+// Tickers that have no Finnhub data — valued at avgCost only
+const MANUAL_TICKERS = new Set(["VTSAX"]);
+
+// Price divisors for tickers with unprocessed splits on Finnhub
+const PRICE_DIVISORS: Record<string, number> = {
+  KXIAY: 10,
+};
 
 const fetchFinnhubQuote = async (symbol: string): Promise<{ price: number; change: number; changePct: number } | null> => {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${FINNHUB_API_KEY}`);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`[Finnhub] ${symbol}: HTTP ${res.status}`);
+      return null;
+    }
     const data = await res.json();
-    if (!data || data.c === 0 || data.c === undefined) return null;
-    return { price: data.c, change: data.d, changePct: data.dp };
-  } catch {
+    if (!data || data.c === 0 || data.c === undefined) {
+      console.warn(`[Finnhub] ${symbol}: no price data`, data);
+      return null;
+    }
+    const divisor = PRICE_DIVISORS[symbol] || 1;
+    return { price: data.c / divisor, change: data.d / divisor, changePct: data.dp };
+  } catch (err) {
+    console.error(`[Finnhub] ${symbol}: fetch error`, err);
     return null;
   }
 };
@@ -113,11 +129,6 @@ const savePositions = (positions: Position[]) => {
   } catch {}
 };
 
-// Tickers that Finnhub can't quote directly — fetch a proxy symbol instead
-const TICKER_PROXY: Record<string, string> = {
-  VTSAX: "VTI",
-};
-
 const basePrices: Record<string, number> = {
   AAPL: 192.5, MSFT: 415.8, GOOGL: 155.2, AMZN: 190.4,
   NVDA: 520.3, TSLA: 260.1, META: 510.2, SPY: 525.6,
@@ -145,11 +156,12 @@ export default function App() {
   }, [positions]);
 
   const fetchAllPrices = useCallback(async (tickers: string[]) => {
-    const results = await Promise.all(tickers.map((t) => fetchFinnhubQuote(TICKER_PROXY[t] || t)));
+    const fetchable = tickers.filter((t) => !MANUAL_TICKERS.has(t));
+    const results = await Promise.all(fetchable.map((t) => fetchFinnhubQuote(t)));
     let anyLive = false;
     setPrices((prev) => {
       const updated = { ...prev };
-      tickers.forEach((t, i) => {
+      fetchable.forEach((t, i) => {
         const quote = results[i];
         if (quote) {
           anyLive = true;
@@ -163,7 +175,7 @@ export default function App() {
       });
       return updated;
     });
-    setDataSource(anyLive ? "live" : "simulated");
+    if (fetchable.length > 0) setDataSource(anyLive ? "live" : "simulated");
     setTick((t) => t + 1);
   }, []);
 
@@ -173,9 +185,16 @@ export default function App() {
     const initial: Record<string, PriceData> = {};
     const histories: Record<string, { date: string; price: number }[]> = {};
     tickers.forEach((t) => {
-      const base = basePrices[t] || 100 + Math.random() * 400;
-      initial[t] = { current: base, prev: base, change: 0, changePct: 0 };
-      histories[t] = generatePriceHistory(base);
+      if (MANUAL_TICKERS.has(t)) {
+        const pos = positions.find((p) => p.ticker === t);
+        const base = pos?.avgCost || 0;
+        initial[t] = { current: base, prev: base, change: 0, changePct: 0 };
+        histories[t] = generatePriceHistory(base);
+      } else {
+        const base = basePrices[t] || 100 + Math.random() * 400;
+        initial[t] = { current: base, prev: base, change: 0, changePct: 0 };
+        histories[t] = generatePriceHistory(base);
+      }
     });
     setPrices(initial);
     setPriceHistory(histories);
@@ -470,9 +489,9 @@ export default function App() {
                   <tr key={p.id} style={{ borderBottom: "1px solid #1e293b11", cursor: "pointer", transition: "background 0.15s" }} onClick={() => setSelectedTicker(p.ticker)} onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
                     <td style={{ padding: "12px", fontWeight: 700, color: "#fff" }}>
                       <span style={{ background: "linear-gradient(135deg, #a78bfa33, #f472b633)", padding: "3px 10px", borderRadius: 8, fontSize: 13 }}>{p.ticker}</span>
-                      {TICKER_PROXY[p.ticker] && (
-                        <span title={`Price via ${TICKER_PROXY[p.ticker]}`} style={{ marginLeft: 6, fontSize: 10, color: "#fbbf24", background: "rgba(251,191,36,0.15)", padding: "2px 6px", borderRadius: 6, fontWeight: 600, cursor: "help" }}>
-                          ~{TICKER_PROXY[p.ticker]}
+                      {MANUAL_TICKERS.has(p.ticker) && (
+                        <span title="No live data — using cost basis" style={{ marginLeft: 6, fontSize: 10, color: "#94a3b8", background: "rgba(148,163,184,0.15)", padding: "2px 6px", borderRadius: 6, fontWeight: 600, cursor: "help" }}>
+                          manual
                         </span>
                       )}
                     </td>
