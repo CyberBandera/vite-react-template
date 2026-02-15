@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid } from "recharts";
+import { PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid } from "recharts";
 import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2 } from "lucide-react";
 import * as Papa from "papaparse";
 
@@ -50,16 +50,34 @@ const TICKER_COLORS = [
   "#4ade80", "#facc15", "#38bdf8", "#fb7185", "#a3e635",
 ];
 
-const generatePriceHistory = (basePrice: number, days = 30) => {
-  const data = [];
-  let price = basePrice * (0.85 + Math.random() * 0.15);
-  for (let i = days; i >= 0; i--) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    price = price * (1 + (Math.random() - 0.48) * 0.04);
-    data.push({ date: date.toLocaleDateString("en-US", { month: "short", day: "numeric" }), price: +price.toFixed(2) });
-  }
-  return data;
+const HISTORY_KEY = "portfolio-history";
+
+const todayKey = () => new Date().toISOString().slice(0, 10);
+
+const loadHistory = (): Record<string, number> => {
+  try {
+    const saved = localStorage.getItem(HISTORY_KEY);
+    if (saved) return JSON.parse(saved);
+  } catch {}
+  return {};
+};
+
+const saveSnapshot = (value: number) => {
+  try {
+    const history = loadHistory();
+    history[todayKey()] = +value.toFixed(2);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  } catch {}
+};
+
+const getHistoryChartData = (): { date: string; value: number }[] => {
+  const history = loadHistory();
+  return Object.entries(history)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([dateStr, value]) => {
+      const d = new Date(dateStr + "T00:00:00");
+      return { date: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }), value };
+    });
 };
 
 const simulatePrice = (basePrice: number) => {
@@ -144,11 +162,10 @@ const basePrices: Record<string, number> = {
 export default function App() {
   const [positions, setPositions] = useState<Position[]>(loadPositions);
   const [prices, setPrices] = useState<Record<string, PriceData>>({});
-  const [priceHistory, setPriceHistory] = useState<Record<string, { date: string; price: number }[]>>({});
+  const [portfolioHistory, setPortfolioHistory] = useState<{ date: string; value: number }[]>(getHistoryChartData);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showCSVModal, setShowCSVModal] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState("All");
-  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [, setTick] = useState(0);
   const [newPos, setNewPos] = useState({ ticker: "", shares: "", avgCost: "", account: "Fidelity" });
   const fileRef = useRef<HTMLInputElement>(null);
@@ -187,15 +204,11 @@ export default function App() {
   useEffect(() => {
     const tickers = [...new Set(positions.map((p) => p.ticker))];
     const initial: Record<string, PriceData> = {};
-    const histories: Record<string, { date: string; price: number }[]> = {};
     tickers.forEach((t) => {
       const base = basePrices[t] || 100 + Math.random() * 400;
       initial[t] = { current: base, prev: base, change: 0, changePct: 0 };
-      histories[t] = generatePriceHistory(base);
     });
     setPrices(initial);
-    setPriceHistory(histories);
-    // Kick off first live fetch
     fetchAllPrices(tickers);
   }, []);
 
@@ -223,19 +236,18 @@ export default function App() {
       });
       return changed ? updated : prev;
     });
-    setPriceHistory((prev) => {
-      const updated = { ...prev };
-      let changed = false;
-      tickers.forEach((t) => {
-        if (!updated[t]) {
-          const base = basePrices[t] || 100 + Math.random() * 400;
-          updated[t] = generatePriceHistory(base);
-          changed = true;
-        }
-      });
-      return changed ? updated : prev;
-    });
   }, [positions]);
+
+  // Record daily portfolio snapshot (uses all positions, not filtered)
+  const allValue = positions.reduce((sum, p) => sum + (prices[p.ticker]?.current || 0) * p.shares, 0);
+  const snapshotRecorded = useRef(false);
+  useEffect(() => {
+    if (allValue > 0 && !snapshotRecorded.current) {
+      snapshotRecorded.current = true;
+      saveSnapshot(allValue);
+      setPortfolioHistory(getHistoryChartData());
+    }
+  }, [allValue]);
 
   const filtered = selectedAccount === "All" ? positions : positions.filter((p) => p.account === selectedAccount);
 
@@ -289,23 +301,6 @@ export default function App() {
   };
 
   const removePosition = (id: number) => setPositions((prev) => prev.filter((p) => p.id !== id));
-
-  const portfolioHistory = (() => {
-    if (filtered.length === 0) return [];
-    const days = 30;
-    const data = [];
-    for (let i = 0; i <= days; i++) {
-      const date = new Date();
-      date.setDate(date.getDate() - (days - i));
-      let total = 0;
-      filtered.forEach((p) => {
-        const hist = priceHistory[p.ticker];
-        if (hist && hist[i]) total += hist[i].price * p.shares;
-      });
-      data.push({ date: date.toLocaleDateString("en-US", { month: "short", day: "numeric" }), value: +total.toFixed(2) });
-    }
-    return data;
-  })();
 
   return (
     <div style={{ minHeight: "100vh", background: "linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%)", color: "#e2e8f0", fontFamily: "'Inter', system-ui, sans-serif", padding: "24px" }}>
@@ -380,8 +375,12 @@ export default function App() {
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, marginBottom: 24 }}>
         {/* Portfolio Value Chart */}
         <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 16, padding: 20, border: "1px solid rgba(255,255,255,0.06)" }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: "#e2e8f0" }}>📈 Portfolio Value (30d)</h3>
-          <ResponsiveContainer width="100%" height={220}>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: "#e2e8f0" }}>📈 Portfolio Value</h3>
+          {portfolioHistory.length === 0 ? (
+            <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", color: "#64748b", fontSize: 13 }}>
+              No history yet — chart will grow as daily snapshots are recorded.
+            </div>
+          ) : <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={portfolioHistory}>
               <defs>
                 <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
@@ -395,7 +394,7 @@ export default function App() {
               <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 10, color: "#e2e8f0", fontSize: 13 }} formatter={(v) => [formatMoney(v as number), "Value"]} />
               <Area type="monotone" dataKey="value" stroke="#a78bfa" strokeWidth={2.5} fill="url(#grad)" />
             </AreaChart>
-          </ResponsiveContainer>
+          </ResponsiveContainer>}
         </div>
 
         {/* Allocation Pie */}
@@ -444,25 +443,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Ticker Detail Chart */}
-      {selectedTicker && priceHistory[selectedTicker] && (
-        <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 16, padding: 20, border: "1px solid rgba(168,139,250,0.2)", marginBottom: 24 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>📊 {selectedTicker} — 30 Day Chart</h3>
-            <button onClick={() => setSelectedTicker(null)} style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer" }}><X size={18} /></button>
-          </div>
-          <ResponsiveContainer width="100%" height={180}>
-            <LineChart data={priceHistory[selectedTicker]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="date" tick={{ fill: "#64748b", fontSize: 11 }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fill: "#64748b", fontSize: 11 }} tickLine={false} axisLine={false} domain={["auto", "auto"]} tickFormatter={(v) => `$${v}`} />
-              <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 10, color: "#e2e8f0", fontSize: 13 }} formatter={(v) => [`$${v}`, "Price"]} />
-              <Line type="monotone" dataKey="price" stroke="#f472b6" strokeWidth={2.5} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-
       {/* Positions Table */}
       <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 16, padding: 20, border: "1px solid rgba(255,255,255,0.06)" }}>
         <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: "#e2e8f0" }}>💼 Positions</h3>
@@ -483,7 +463,7 @@ export default function App() {
                 const plPct = p.avgCost > 0 ? (pl / (p.avgCost * p.shares)) * 100 : 0;
                 const isUp = pl >= 0;
                 return (
-                  <tr key={p.id} style={{ borderBottom: "1px solid #1e293b11", cursor: "pointer", transition: "background 0.15s" }} onClick={() => setSelectedTicker(p.ticker)} onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+                  <tr key={p.id} style={{ borderBottom: "1px solid #1e293b11", transition: "background 0.15s" }} onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
                     <td style={{ padding: "12px", fontWeight: 700, color: "#fff" }}>
                       <span style={{ background: "linear-gradient(135deg, #a78bfa33, #f472b633)", padding: "3px 10px", borderRadius: 8, fontSize: 13 }}>{p.ticker}</span>
                     </td>
