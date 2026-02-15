@@ -71,6 +71,32 @@ interface PriceData {
   changePct: number;
 }
 
+const defaultPositions: Position[] = [
+  { id: 1, ticker: "RKLB", shares: 523, avgCost: 38.14, account: "Chase" },
+  { id: 2, ticker: "NVDA", shares: 181.79665, avgCost: 153.99, account: "Chase" },
+  { id: 3, ticker: "SAABY", shares: 799, avgCost: 27.16, account: "Chase" },
+  { id: 4, ticker: "MU", shares: 43.36685, avgCost: 332.66, account: "Chase" },
+  { id: 5, ticker: "VTSAX", shares: 98.233, avgCost: 134.51, account: "Chase" },
+  { id: 6, ticker: "BRKB", shares: 28.10829, avgCost: 486.49, account: "Chase" },
+  { id: 7, ticker: "QS", shares: 1481.85422, avgCost: 10.24, account: "Chase" },
+  { id: 8, ticker: "SNDK", shares: 18, avgCost: 195.94, account: "Chase" },
+  { id: 9, ticker: "INTC", shares: 215.92714, avgCost: 41.12, account: "Chase" },
+  { id: 10, ticker: "MSFT", shares: 18.03129, avgCost: 495.94, account: "Chase" },
+  { id: 11, ticker: "UAMY", shares: 876, avgCost: 9.03, account: "Chase" },
+  { id: 12, ticker: "RNMBY", shares: 17, avgCost: 390.13, account: "Chase" },
+  { id: 13, ticker: "AAPL", shares: 22.82144, avgCost: 254.16, account: "Chase" },
+  { id: 14, ticker: "KXIAY", shares: 320, avgCost: 0, account: "Chase" },
+  { id: 15, ticker: "ASML", shares: 3, avgCost: 1435, account: "Chase" },
+  { id: 16, ticker: "LYSDY", shares: 325, avgCost: 13.65, account: "Chase" },
+  { id: 17, ticker: "SMERY", shares: 18, avgCost: 181.9, account: "Chase" },
+  { id: 18, ticker: "SHWDY", shares: 37, avgCost: 66.69, account: "Chase" },
+  { id: 19, ticker: "COHU", shares: 73, avgCost: 33.79, account: "Chase" },
+  { id: 20, ticker: "ABAT", shares: 500, avgCost: 2.59, account: "Chase" },
+  { id: 21, ticker: "FCX", shares: 22.73364, avgCost: 61.89, account: "Chase" },
+  { id: 22, ticker: "TER", shares: 8, avgCost: 251, account: "Fidelity" },
+  { id: 23, ticker: "KRKNF", shares: 450, avgCost: 4.25, account: "Fidelity" },
+];
+
 const STORAGE_KEY = "portfolio-positions";
 
 const loadPositions = (): Position[] => {
@@ -78,7 +104,7 @@ const loadPositions = (): Position[] => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) return JSON.parse(saved);
   } catch {}
-  return [];
+  return defaultPositions;
 };
 
 const savePositions = (positions: Position[]) => {
