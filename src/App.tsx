@@ -71,14 +71,21 @@ interface PriceData {
   changePct: number;
 }
 
-const defaultPositions: Position[] = [
-  { id: 1, ticker: "AAPL", shares: 15, avgCost: 178.50, account: "Fidelity" },
-  { id: 2, ticker: "MSFT", shares: 10, avgCost: 380.20, account: "Fidelity" },
-  { id: 3, ticker: "GOOGL", shares: 8, avgCost: 140.75, account: "Chase" },
-  { id: 4, ticker: "AMZN", shares: 12, avgCost: 175.30, account: "Chase" },
-  { id: 5, ticker: "NVDA", shares: 20, avgCost: 450.00, account: "Fidelity" },
-  { id: 6, ticker: "TSLA", shares: 5, avgCost: 245.80, account: "Chase" },
-];
+const STORAGE_KEY = "portfolio-positions";
+
+const loadPositions = (): Position[] => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) return JSON.parse(saved);
+  } catch {}
+  return [];
+};
+
+const savePositions = (positions: Position[]) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(positions));
+  } catch {}
+};
 
 const basePrices: Record<string, number> = {
   AAPL: 192.5, MSFT: 415.8, GOOGL: 155.2, AMZN: 190.4,
@@ -88,7 +95,7 @@ const basePrices: Record<string, number> = {
 };
 
 export default function App() {
-  const [positions, setPositions] = useState<Position[]>(defaultPositions);
+  const [positions, setPositions] = useState<Position[]>(loadPositions);
   const [prices, setPrices] = useState<Record<string, PriceData>>({});
   const [priceHistory, setPriceHistory] = useState<Record<string, { date: string; price: number }[]>>({});
   const [showAddModal, setShowAddModal] = useState(false);
@@ -98,8 +105,13 @@ export default function App() {
   const [, setTick] = useState(0);
   const [newPos, setNewPos] = useState({ ticker: "", shares: "", avgCost: "", account: "Fidelity" });
   const fileRef = useRef<HTMLInputElement>(null);
-  const nextId = useRef(100);
+  const nextId = useRef(positions.reduce((max, p) => Math.max(max, p.id), 0) + 1);
   const [dataSource, setDataSource] = useState<"connecting" | "live" | "simulated">("connecting");
+
+  // Persist positions to localStorage
+  useEffect(() => {
+    savePositions(positions);
+  }, [positions]);
 
   const fetchAllPrices = useCallback(async (tickers: string[]) => {
     const results = await Promise.all(tickers.map((t) => fetchFinnhubQuote(t)));
