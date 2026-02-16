@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid } from "recharts";
-import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2, Sun, Moon } from "lucide-react";
+import { PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid, BarChart, Bar, ReferenceLine } from "recharts";
+import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2, Sun, Moon, Calendar, Newspaper, ExternalLink } from "lucide-react";
 import * as Papa from "papaparse";
 import confetti from "canvas-confetti";
 
@@ -130,6 +130,33 @@ const TICKER_COLORS = [
   "#4ade80", "#facc15", "#38bdf8", "#fb7185", "#a3e635",
 ];
 
+// ── Sector Classification ──
+
+const SECTOR_MAP: Record<string, string> = {
+  NVDA: "Semiconductors", MU: "Semiconductors", INTC: "Semiconductors", ASML: "Semiconductors",
+  KXIAY: "Semiconductors", COHU: "Semiconductors", TER: "Semiconductors",
+  RKLB: "Space/Defense",
+  SAABY: "Automotive/EV", QS: "Automotive/EV",
+  VTSAX: "Index/ETF",
+  BRKB: "Finance",
+  MSFT: "Tech", AAPL: "Tech", SNDK: "Tech",
+  UAMY: "Critical Minerals", LYSDY: "Critical Minerals", KRKNF: "Critical Minerals", FCX: "Critical Minerals",
+  RNMBY: "Consumer", SMERY: "Consumer", SHWDY: "Consumer",
+  ABAT: "Battery/Energy",
+};
+
+const SECTOR_COLORS: Record<string, string> = {
+  "Semiconductors": "#60a5fa",
+  "Space/Defense": "#f472b6",
+  "Automotive/EV": "#34d399",
+  "Index/ETF": "#fbbf24",
+  "Finance": "#a78bfa",
+  "Tech": "#38bdf8",
+  "Critical Minerals": "#fb923c",
+  "Consumer": "#e879f9",
+  "Battery/Energy": "#4ade80",
+};
+
 // ── Helpers ──
 
 const simulatePrice = (basePrice: number) => {
@@ -197,6 +224,22 @@ interface PriceData {
   prev: number;
   change: number;
   changePct: number;
+}
+
+interface NewsItem {
+  headline: string;
+  source: string;
+  datetime: number;
+  url: string;
+  ticker: string;
+}
+
+interface EarningsEvent {
+  symbol: string;
+  date: string;
+  hour: string;
+  epsEstimate: number | null;
+  revenueEstimate: number | null;
 }
 
 // ── Default Positions ──
@@ -268,6 +311,19 @@ const loadTheme = (): "dark" | "light" => {
   return "dark";
 };
 
+const PL_KEY = "portfolio-daily-pl";
+const loadDailyPLStore = (): Record<string, number> => {
+  try { const s = localStorage.getItem(PL_KEY); if (s) return JSON.parse(s); } catch {}
+  return {};
+};
+const saveDailyPLEntry = (value: number) => {
+  try {
+    const data = loadDailyPLStore();
+    data[todayKey()] = +value.toFixed(2);
+    localStorage.setItem(PL_KEY, JSON.stringify(data));
+  } catch {}
+};
+
 const basePrices: Record<string, number> = {
   AAPL: 192.5, MSFT: 415.8, GOOGL: 155.2, AMZN: 190.4,
   NVDA: 520.3, TSLA: 260.1, META: 510.2, SPY: 525.6,
@@ -290,6 +346,11 @@ export default function App() {
   const nextId = useRef(positions.reduce((max, p) => Math.max(max, p.id), 0) + 1);
   const [dataSource, setDataSource] = useState<"connecting" | "live" | "simulated">("connecting");
   const [themeMode, setThemeMode] = useState<"dark" | "light">(loadTheme);
+  const [news, setNews] = useState<NewsItem[]>([]);
+  const [earnings, setEarnings] = useState<EarningsEvent[]>([]);
+  const [newsLoading, setNewsLoading] = useState(true);
+  const [earningsLoading, setEarningsLoading] = useState(true);
+  const [dailyPLData, setDailyPLData] = useState<Record<string, number>>(loadDailyPLStore);
 
   const t = themeMode === "dark" ? darkTheme : lightTheme;
 
@@ -422,6 +483,134 @@ export default function App() {
       losers: sorted.filter((p) => p.plPct < 0).reverse().slice(0, 3),
     };
   }, [positions, prices]);
+
+  // ── Sector Data ──
+  const sectorData = useMemo(() => {
+    const sectors: Record<string, number> = {};
+    filtered.forEach((p) => {
+      const sector = SECTOR_MAP[p.ticker] || "Other";
+      const value = (prices[p.ticker]?.current || 0) * p.shares;
+      sectors[sector] = (sectors[sector] || 0) + value;
+    });
+    return Object.entries(sectors)
+      .map(([name, value]) => ({ name, value: +value.toFixed(2), color: SECTOR_COLORS[name] || "#94a3b8" }))
+      .filter((d) => d.value > 0)
+      .sort((a, b) => b.value - a.value);
+  }, [filtered, prices]);
+
+  // ── Top 5 Holdings by value (for news) ──
+  const top5Tickers = useMemo(() => {
+    const tickerValues: Record<string, number> = {};
+    positions.forEach((p) => {
+      const value = (prices[p.ticker]?.current || 0) * p.shares;
+      tickerValues[p.ticker] = (tickerValues[p.ticker] || 0) + value;
+    });
+    return Object.entries(tickerValues)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5)
+      .map(([ticker]) => ticker);
+  }, [positions, prices]);
+
+  // ── News Feed ──
+  const newsFetched = useRef(false);
+  useEffect(() => {
+    if (top5Tickers.length === 0 || newsFetched.current) return;
+    if (!prices[top5Tickers[0]] || prices[top5Tickers[0]].current === 0) return;
+    newsFetched.current = true;
+
+    const doFetch = async () => {
+      const to = new Date().toISOString().slice(0, 10);
+      const from = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+      const allNews: NewsItem[] = [];
+
+      for (const ticker of top5Tickers) {
+        const apiSymbol = FINNHUB_SYMBOLS[ticker] || ticker;
+        try {
+          const res = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(apiSymbol)}&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data)) {
+              allNews.push(...data.slice(0, 4).map((d: any) => ({
+                headline: d.headline,
+                source: d.source,
+                datetime: d.datetime,
+                url: d.url,
+                ticker,
+              })));
+            }
+          }
+        } catch {}
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      setNews(allNews.sort((a, b) => b.datetime - a.datetime).slice(0, 10));
+      setNewsLoading(false);
+    };
+
+    doFetch();
+  }, [top5Tickers, prices]);
+
+  // ── Earnings Calendar ──
+  const earningsFetched = useRef(false);
+  useEffect(() => {
+    if (positions.length === 0 || earningsFetched.current) return;
+    earningsFetched.current = true;
+
+    const doFetch = async () => {
+      const from = new Date().toISOString().slice(0, 10);
+      const to = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
+      const tickers = [...new Set(positions.map((p) => p.ticker))];
+      const apiToDisplay: Record<string, string> = {};
+      tickers.forEach((tk) => { apiToDisplay[FINNHUB_SYMBOLS[tk] || tk] = tk; });
+      const apiSymbols = new Set(Object.keys(apiToDisplay));
+
+      try {
+        const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${from}&to=${to}&token=${FINNHUB_API_KEY}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.earningsCalendar) {
+            const items = data.earningsCalendar
+              .filter((e: any) => apiSymbols.has(e.symbol))
+              .map((e: any) => ({
+                symbol: apiToDisplay[e.symbol] || e.symbol,
+                date: e.date,
+                hour: e.hour || "",
+                epsEstimate: e.epsEstimate ?? null,
+                revenueEstimate: e.revenueEstimate ?? null,
+              }));
+            setEarnings(items.sort((a: EarningsEvent, b: EarningsEvent) => a.date.localeCompare(b.date)));
+          }
+        }
+      } catch {}
+      setEarningsLoading(false);
+    };
+
+    doFetch();
+  }, [positions]);
+
+  // ── Daily P&L Tracking ──
+  const plRecorded = useRef(false);
+  useEffect(() => {
+    if (allValue > 0 && !plRecorded.current) {
+      plRecorded.current = true;
+      saveDailyPLEntry(allValue);
+      setDailyPLData(loadDailyPLStore());
+    }
+  }, [allValue]);
+
+  // ── Daily P&L Chart Data ──
+  const plChartData = useMemo(() => {
+    const entries = Object.entries(dailyPLData).sort(([a], [b]) => a.localeCompare(b));
+    if (entries.length < 2) return [];
+    return entries.slice(1).map(([date, value], i) => {
+      const change = value - entries[i][1];
+      return {
+        date: new Date(date + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        pl: +change.toFixed(2),
+        fill: change >= 0 ? "#34d399" : "#f87171",
+      };
+    });
+  }, [dailyPLData]);
 
   const handleAdd = () => {
     if (!newPos.ticker || !newPos.shares || !newPos.avgCost) return;
@@ -556,7 +745,7 @@ export default function App() {
       </div>
 
       {/* Charts Row */}
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, marginBottom: 24 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr 1fr", gap: 16, marginBottom: 24 }}>
         {/* Portfolio Value Chart */}
         <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>📈 Portfolio Value</h3>
@@ -605,12 +794,130 @@ export default function App() {
             ))}
           </div>
         </div>
+
+        {/* Sector Breakdown */}
+        <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>🏭 Sectors</h3>
+          <ResponsiveContainer width="100%" height={160}>
+            <PieChart>
+              <Pie data={sectorData} cx="50%" cy="50%" innerRadius={45} outerRadius={70} dataKey="value" stroke="none">
+                {sectorData.map((d, i) => (
+                  <Cell key={i} fill={d.color} />
+                ))}
+              </Pie>
+              <Tooltip contentStyle={{ background: t.tooltipBg, border: `1px solid ${t.tooltipBorder}`, borderRadius: 10, color: t.text, fontSize: 12 }} formatter={(v: any) => [formatMoney(v as number), ""]} />
+            </PieChart>
+          </ResponsiveContainer>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
+            {sectorData.map((d, i) => (
+              <span key={i} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: t.textMuted }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: d.color, display: "inline-block" }} />
+                {d.name}
+              </span>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Best / Worst Performers */}
       <div style={{ display: "flex", gap: 16, marginBottom: 24 }}>
         <PerformerCard items={gainers} label="Top Gainers" icon="🔥" />
         <PerformerCard items={losers} label="Top Losers" icon="📉" />
+      </div>
+
+      {/* Daily P&L Bar Chart */}
+      <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
+        <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>📊 Daily P&L</h3>
+        {plChartData.length === 0 ? (
+          <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>
+            P&L tracking starts today — bars will appear as daily data accumulates.
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height={180}>
+            <BarChart data={plChartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke={t.gridStroke} />
+              <XAxis dataKey="date" tick={{ fill: t.textDim, fontSize: 11 }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fill: t.textDim, fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
+              <ReferenceLine y={0} stroke={t.textDim} strokeDasharray="3 3" />
+              <Tooltip contentStyle={{ background: t.tooltipBg, border: `1px solid ${t.tooltipBorder}`, borderRadius: 10, color: t.text, fontSize: 13 }} formatter={(v: any) => [formatMoney(v as number), "P&L"]} />
+              <Bar dataKey="pl" radius={[4, 4, 0, 0]}>
+                {plChartData.map((d, i) => (
+                  <Cell key={i} fill={d.fill} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* News & Earnings Row */}
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, marginBottom: 24 }}>
+        {/* News Feed */}
+        <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text, display: "flex", alignItems: "center", gap: 8 }}>
+            <Newspaper size={16} /> News Feed
+          </h3>
+          {newsLoading ? (
+            <div style={{ color: t.textDim, fontSize: 13, padding: "20px 0" }}>Loading news...</div>
+          ) : news.length === 0 ? (
+            <div style={{ color: t.textDim, fontSize: 13, padding: "20px 0" }}>No recent news available.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 340, overflowY: "auto" }}>
+              {news.map((n, i) => (
+                <a key={i} href={n.url} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none", display: "block", padding: 12, borderRadius: 10, background: t.hoverBg, border: `1px solid ${t.cardBorder}`, transition: "background 0.15s" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: t.textBold, lineHeight: 1.4, marginBottom: 4 }}>{n.headline}</div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11, color: t.textDim }}>
+                        <span style={{ background: t.tickerBadgeBg, padding: "2px 8px", borderRadius: 6, fontWeight: 700, fontSize: 11, color: t.textBold }}>{n.ticker}</span>
+                        <span>{n.source}</span>
+                        <span style={{ opacity: 0.5 }}>·</span>
+                        <span>{new Date(n.datetime * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                      </div>
+                    </div>
+                    <ExternalLink size={14} style={{ color: t.textDim, flexShrink: 0, marginTop: 2 }} />
+                  </div>
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Earnings Calendar */}
+        <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text, display: "flex", alignItems: "center", gap: 8 }}>
+            <Calendar size={16} /> Earnings Calendar
+          </h3>
+          {earningsLoading ? (
+            <div style={{ color: t.textDim, fontSize: 13, padding: "20px 0" }}>Loading earnings data...</div>
+          ) : earnings.length === 0 ? (
+            <div style={{ color: t.textDim, fontSize: 13, padding: "20px 0" }}>No upcoming earnings found.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 340, overflowY: "auto" }}>
+              {earnings.map((e, i) => {
+                const daysUntil = Math.ceil((new Date(e.date + "T00:00:00").getTime() - Date.now()) / 86400000);
+                const isWithin7 = daysUntil >= 0 && daysUntil <= 7;
+                return (
+                  <div key={i} style={{ padding: 10, borderRadius: 10, background: isWithin7 ? "rgba(251,191,36,0.1)" : t.hoverBg, border: `1px solid ${isWithin7 ? "rgba(251,191,36,0.3)" : t.cardBorder}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ background: t.tickerBadgeBg, padding: "3px 10px", borderRadius: 8, fontSize: 13, fontWeight: 700, color: t.textBold }}>{e.symbol}</span>
+                      <span style={{ fontSize: 12, color: isWithin7 ? "#fbbf24" : t.textMuted, fontWeight: isWithin7 ? 700 : 500 }}>
+                        {new Date(e.date + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                        {isWithin7 && ` (${daysUntil === 0 ? "Today" : daysUntil === 1 ? "Tomorrow" : `in ${daysUntil}d`})`}
+                      </span>
+                    </div>
+                    {(e.hour || e.epsEstimate !== null) && (
+                      <div style={{ fontSize: 11, color: t.textDim, marginTop: 4 }}>
+                        {e.hour === "bmo" ? "Before market open" : e.hour === "amc" ? "After market close" : e.hour}
+                        {e.epsEstimate !== null && `${e.hour ? " · " : ""}EPS est: $${e.epsEstimate}`}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Account Breakdown Bar */}
