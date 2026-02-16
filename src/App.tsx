@@ -361,7 +361,11 @@ export default function App() {
   useEffect(() => { savePositions(positions); }, [positions]);
 
   const fetchAllPrices = useCallback(async (tickers: string[]) => {
-    const results = await Promise.all(tickers.map((tk) => fetchFinnhubQuote(tk)));
+    const results: (Awaited<ReturnType<typeof fetchFinnhubQuote>>)[] = [];
+    for (const tk of tickers) {
+      results.push(await fetchFinnhubQuote(tk));
+      if (tickers.length > 1) await new Promise((r) => setTimeout(r, 300));
+    }
     let anyLive = false;
     setPrices((prev) => {
       const updated = { ...prev };
@@ -400,7 +404,7 @@ export default function App() {
     const interval = setInterval(() => {
       const tickers = [...new Set(positions.map((p) => p.ticker))];
       fetchAllPrices(tickers);
-    }, 5000);
+    }, 30000);
     return () => clearInterval(interval);
   }, [positions, fetchAllPrices]);
 
@@ -427,15 +431,15 @@ export default function App() {
   const athFired = useRef(false);
 
   useEffect(() => {
-    if (allValue > 0 && !snapshotRecorded.current) {
+    if (allValue > 0 && !snapshotRecorded.current && dataSource === "live") {
       snapshotRecorded.current = true;
       saveSnapshot(allValue);
       setPortfolioHistory(getHistoryChartData());
     }
-  }, [allValue]);
+  }, [allValue, dataSource]);
 
   useEffect(() => {
-    if (allValue > 0 && !athFired.current) {
+    if (allValue > 0 && !athFired.current && dataSource === "live") {
       const prevATH = loadATH();
       if (allValue > prevATH) {
         localStorage.setItem(ATH_KEY, String(+allValue.toFixed(2)));
@@ -445,7 +449,7 @@ export default function App() {
         }
       }
     }
-  }, [allValue]);
+  }, [allValue, dataSource]);
 
   const filtered = selectedAccount === "All" ? positions : positions.filter((p) => p.account === selectedAccount);
 
@@ -591,12 +595,12 @@ export default function App() {
   // ── Daily P&L Tracking ──
   const plRecorded = useRef(false);
   useEffect(() => {
-    if (allValue > 0 && !plRecorded.current) {
+    if (allValue > 0 && !plRecorded.current && dataSource === "live") {
       plRecorded.current = true;
       saveDailyPLEntry(allValue);
       setDailyPLData(loadDailyPLStore());
     }
-  }, [allValue]);
+  }, [allValue, dataSource]);
 
   // ── Daily P&L Chart Data ──
   const plChartData = useMemo(() => {
@@ -675,7 +679,7 @@ export default function App() {
               📊 My Portfolio Tracker
             </h1>
             <p style={{ color: t.textMuted, margin: "4px 0 0", fontSize: 13 }}>
-              {dataSource === "live" ? "Finnhub live prices" : dataSource === "simulated" ? "Simulated prices (API fallback)" : "Connecting to Finnhub..."} update every 5s • <span style={{ color: dataSource === "live" ? "#4ade80" : dataSource === "simulated" ? "#fbbf24" : t.textMuted }}>●</span> {dataSource === "live" ? "Live" : dataSource === "simulated" ? "Simulated" : "..."}
+              {dataSource === "live" ? "Finnhub live prices" : dataSource === "simulated" ? "Simulated prices (API fallback)" : "Connecting to Finnhub..."} update every 30s • <span style={{ color: dataSource === "live" ? "#4ade80" : dataSource === "simulated" ? "#fbbf24" : t.textMuted }}>●</span> {dataSource === "live" ? "Live" : dataSource === "simulated" ? "Simulated" : "..."}
             </p>
           </div>
           {/* Mood */}
