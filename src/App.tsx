@@ -449,7 +449,8 @@ const fetchCandleData = async (displayTicker: string, timeframe: string): Promis
   const rangeMap: Record<string, string> = { "1D": "1d", "5D": "5d", "1M": "1mo", "6M": "6mo", "1Y": "1y" };
   const interval = intervalMap[timeframe] || "1d";
   const range = rangeMap[timeframe] || "1y";
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${interval}&range=${range}`;
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${interval}&range=${range}`;
+  const url = `https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`;
   console.log(`[Candle] ${displayTicker} → Yahoo ${yahooSymbol} tf=${timeframe} interval=${interval} range=${range}`);
   console.log(`[Candle] URL: ${url}`);
   try {
@@ -479,7 +480,8 @@ const fetchCandleData = async (displayTicker: string, timeframe: string): Promis
 
 const fetchRawCandles = async (displayTicker: string): Promise<number[] | null> => {
   const yahooSymbol = YAHOO_SYMBOLS[displayTicker] || displayTicker;
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=1mo`;
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=1mo`;
+  const url = `https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`;
   console.log(`[Correlation] Fetching ${displayTicker} → Yahoo ${yahooSymbol}`);
   try {
     const res = await fetch(url);
