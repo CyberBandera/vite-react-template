@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid, BarChart, Bar, ReferenceLine } from "recharts";
-import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2, Sun, Moon, Calendar, Newspaper, ExternalLink, Bell, Calculator, LayoutGrid, Table2, FileText } from "lucide-react";
+import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2, Sun, Moon, Bell, Calculator, LayoutGrid, Table2, FileText } from "lucide-react";
 import * as Papa from "papaparse";
 import confetti from "canvas-confetti";
 import { jsPDF } from "jspdf";
@@ -243,22 +243,6 @@ interface PriceData {
   changePct: number;
 }
 
-interface NewsItem {
-  headline: string;
-  source: string;
-  datetime: number;
-  url: string;
-  ticker: string;
-}
-
-interface EarningsEvent {
-  symbol: string;
-  date: string;
-  hour: string;
-  epsEstimate: number | null;
-  revenueEstimate: number | null;
-}
-
 interface PriceAlert {
   id: number;
   ticker: string;
@@ -359,15 +343,23 @@ const loadTheme = (): "dark" | "light" => {
 };
 
 const PL_KEY = "portfolio-daily-pl";
+const PL_TICKERS_KEY = "portfolio-daily-pl-tickers";
 const loadDailyPLStore = (): Record<string, number> => {
   try { const s = localStorage.getItem(PL_KEY); if (s) return JSON.parse(s); } catch {}
   return {};
 };
-const saveDailyPLEntry = (value: number) => {
+const loadDailyPLTickers = (): Record<string, Record<string, number>> => {
+  try { const s = localStorage.getItem(PL_TICKERS_KEY); if (s) return JSON.parse(s); } catch {}
+  return {};
+};
+const saveDailyPLEntry = (value: number, tickerValues: Record<string, number>) => {
   try {
     const data = loadDailyPLStore();
     data[todayKey()] = +value.toFixed(2);
     localStorage.setItem(PL_KEY, JSON.stringify(data));
+    const tickerData = loadDailyPLTickers();
+    tickerData[todayKey()] = tickerValues;
+    localStorage.setItem(PL_TICKERS_KEY, JSON.stringify(tickerData));
   } catch {}
 };
 
@@ -449,10 +441,8 @@ const fetchCandleData = async (displayTicker: string, timeframe: string): Promis
   const rangeMap: Record<string, string> = { "1D": "1d", "5D": "5d", "1M": "1mo", "6M": "6mo", "1Y": "1y" };
   const interval = intervalMap[timeframe] || "1d";
   const range = rangeMap[timeframe] || "1y";
-  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${interval}&range=${range}`;
-  const url = `https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`;
+  const url = `/api/yahoo-chart?symbol=${encodeURIComponent(yahooSymbol)}&interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
   console.log(`[Candle] ${displayTicker} → Yahoo ${yahooSymbol} tf=${timeframe} interval=${interval} range=${range}`);
-  console.log(`[Candle] URL: ${url}`);
   try {
     const res = await fetch(url);
     if (!res.ok) {
@@ -480,8 +470,7 @@ const fetchCandleData = async (displayTicker: string, timeframe: string): Promis
 
 const fetchRawCandles = async (displayTicker: string): Promise<number[] | null> => {
   const yahooSymbol = YAHOO_SYMBOLS[displayTicker] || displayTicker;
-  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=1mo`;
-  const url = `https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`;
+  const url = `/api/yahoo-chart?symbol=${encodeURIComponent(yahooSymbol)}&interval=1d&range=1mo`;
   console.log(`[Correlation] Fetching ${displayTicker} → Yahoo ${yahooSymbol}`);
   try {
     const res = await fetch(url);
@@ -541,10 +530,6 @@ export default function App() {
   const nextId = useRef(positions.reduce((max, p) => Math.max(max, p.id), 0) + 1);
   const [dataSource, setDataSource] = useState<"connecting" | "live" | "simulated">("connecting");
   const [themeMode, setThemeMode] = useState<"dark" | "light">(loadTheme);
-  const [news, setNews] = useState<NewsItem[]>([]);
-  const [earnings, setEarnings] = useState<EarningsEvent[]>([]);
-  const [newsLoading, setNewsLoading] = useState(true);
-  const [earningsLoading, setEarningsLoading] = useState(true);
   const [dailyPLData, setDailyPLData] = useState<Record<string, number>>(loadDailyPLStore);
 
   // Round 4 state
@@ -614,12 +599,12 @@ export default function App() {
     fetchAllPrices(tickers);
   }, []);
 
-  // Refresh every 5s
+  // Refresh every 60s
   useEffect(() => {
     const interval = setInterval(() => {
       const tickers = [...new Set(positions.map((p) => p.ticker))];
       fetchAllPrices(tickers);
-    }, 30000);
+    }, 60000);
     return () => clearInterval(interval);
   }, [positions, fetchAllPrices]);
 
@@ -717,116 +702,45 @@ export default function App() {
       .sort((a, b) => b.value - a.value);
   }, [filtered, prices]);
 
-  // ── Top 5 Holdings by value (for news) ──
-  const top5Tickers = useMemo(() => {
-    const tickerValues: Record<string, number> = {};
-    positions.forEach((p) => {
-      const value = (prices[p.ticker]?.current || 0) * p.shares;
-      tickerValues[p.ticker] = (tickerValues[p.ticker] || 0) + value;
-    });
-    return Object.entries(tickerValues)
-      .sort(([, a], [, b]) => b - a)
-      .slice(0, 5)
-      .map(([ticker]) => ticker);
-  }, [positions, prices]);
-
-  // ── News Feed ──
-  const newsFetched = useRef(false);
-  useEffect(() => {
-    if (top5Tickers.length === 0 || newsFetched.current) return;
-    if (!prices[top5Tickers[0]] || prices[top5Tickers[0]].current === 0) return;
-    newsFetched.current = true;
-
-    const doFetch = async () => {
-      const to = new Date().toISOString().slice(0, 10);
-      const from = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-      const allNews: NewsItem[] = [];
-
-      for (const ticker of top5Tickers) {
-        const apiSymbol = FINNHUB_SYMBOLS[ticker] || ticker;
-        try {
-          const res = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(apiSymbol)}&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`);
-          if (res.ok) {
-            const data = await res.json();
-            if (Array.isArray(data)) {
-              allNews.push(...data.slice(0, 4).map((d: any) => ({
-                headline: d.headline,
-                source: d.source,
-                datetime: d.datetime,
-                url: d.url,
-                ticker,
-              })));
-            }
-          }
-        } catch {}
-        await new Promise((r) => setTimeout(r, 250));
-      }
-
-      setNews(allNews.sort((a, b) => b.datetime - a.datetime).slice(0, 10));
-      setNewsLoading(false);
-    };
-
-    doFetch();
-  }, [top5Tickers, prices]);
-
-  // ── Earnings Calendar ──
-  const earningsFetched = useRef(false);
-  useEffect(() => {
-    if (positions.length === 0 || earningsFetched.current) return;
-    earningsFetched.current = true;
-
-    const doFetch = async () => {
-      const from = new Date().toISOString().slice(0, 10);
-      const to = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
-      const tickers = [...new Set(positions.map((p) => p.ticker))];
-      const apiToDisplay: Record<string, string> = {};
-      tickers.forEach((tk) => { apiToDisplay[FINNHUB_SYMBOLS[tk] || tk] = tk; });
-      const apiSymbols = new Set(Object.keys(apiToDisplay));
-
-      try {
-        const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${from}&to=${to}&token=${FINNHUB_API_KEY}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.earningsCalendar) {
-            const items = data.earningsCalendar
-              .filter((e: any) => apiSymbols.has(e.symbol))
-              .map((e: any) => ({
-                symbol: apiToDisplay[e.symbol] || e.symbol,
-                date: e.date,
-                hour: e.hour || "",
-                epsEstimate: e.epsEstimate ?? null,
-                revenueEstimate: e.revenueEstimate ?? null,
-              }));
-            setEarnings(items.sort((a: EarningsEvent, b: EarningsEvent) => a.date.localeCompare(b.date)));
-          }
-        }
-      } catch {}
-      setEarningsLoading(false);
-    };
-
-    doFetch();
-  }, [positions]);
-
   // ── Daily P&L Tracking ──
   const plRecorded = useRef(false);
   useEffect(() => {
     if (allValue > 0 && !plRecorded.current && dataSource === "live") {
       plRecorded.current = true;
-      saveDailyPLEntry(allValue);
+      const tickerValues: Record<string, number> = {};
+      positions.forEach((p) => {
+        const price = prices[p.ticker]?.current || 0;
+        tickerValues[p.ticker] = +(tickerValues[p.ticker] || 0) + +(price * p.shares).toFixed(2);
+      });
+      saveDailyPLEntry(allValue, tickerValues);
       setDailyPLData(loadDailyPLStore());
     }
-  }, [allValue, dataSource]);
+  }, [allValue, dataSource, positions, prices]);
 
   // ── Daily P&L Chart Data ──
   const plChartData = useMemo(() => {
     const entries = Object.entries(dailyPLData).sort(([a], [b]) => a.localeCompare(b));
     if (entries.length < 2) return [];
+    const tickerData = loadDailyPLTickers();
     return entries.slice(1).map(([date, value], i) => {
+      const prevDate = entries[i][0];
       const change = value - entries[i][1];
+      const todayTickers = tickerData[date] || {};
+      const prevTickers = tickerData[prevDate] || {};
+      const tickerChanges: { ticker: string; change: number }[] = [];
+      const allTickers = new Set([...Object.keys(todayTickers), ...Object.keys(prevTickers)]);
+      allTickers.forEach((tk) => {
+        const cur = todayTickers[tk] || 0;
+        const prev = prevTickers[tk] || 0;
+        if (cur !== 0 || prev !== 0) tickerChanges.push({ ticker: tk, change: +(cur - prev).toFixed(2) });
+      });
+      tickerChanges.sort((a, b) => b.change - a.change);
       return {
         date: new Date(date + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }),
         pl: +change.toFixed(2),
         fill: change >= 0 ? "#34d399" : "#f87171",
+        gainers: tickerChanges.filter((c) => c.change > 0).slice(0, 5),
+        losers: tickerChanges.filter((c) => c.change < 0).slice(-5).reverse(),
       };
     });
   }, [dailyPLData]);
@@ -1443,13 +1357,46 @@ export default function App() {
             P&L tracking starts today — bars will appear as daily data accumulates.
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={180}>
+          <ResponsiveContainer width="100%" height={220}>
             <BarChart data={plChartData}>
               <CartesianGrid strokeDasharray="3 3" stroke={t.gridStroke} />
               <XAxis dataKey="date" tick={{ fill: t.textDim, fontSize: 11 }} tickLine={false} axisLine={false} />
               <YAxis tick={{ fill: t.textDim, fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
               <ReferenceLine y={0} stroke={t.textDim} strokeDasharray="3 3" />
-              <Tooltip contentStyle={{ background: t.tooltipBg, border: `1px solid ${t.tooltipBorder}`, borderRadius: 10, color: t.text, fontSize: 13 }} formatter={(v: any) => [formatMoney(v as number), "P&L"]} />
+              <Tooltip content={({ active, payload }) => {
+                if (!active || !payload?.[0]) return null;
+                const d = payload[0].payload as typeof plChartData[0];
+                return (
+                  <div style={{ background: t.tooltipBg, border: `1px solid ${t.tooltipBorder}`, borderRadius: 10, padding: 12, color: t.text, fontSize: 12, minWidth: 200, boxShadow: t.shadow }}>
+                    <div style={{ fontWeight: 700, marginBottom: 8, fontSize: 13 }}>{d.date}: <span style={{ color: d.pl >= 0 ? "#34d399" : "#f87171" }}>{formatMoney(d.pl)}</span></div>
+                    {d.gainers.length > 0 && (
+                      <div style={{ marginBottom: 6 }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#34d399", marginBottom: 4, textTransform: "uppercase" }}>Top Gainers</div>
+                        {d.gainers.map((g) => (
+                          <div key={g.ticker} style={{ display: "flex", justifyContent: "space-between", padding: "1px 0" }}>
+                            <span style={{ fontWeight: 600 }}>{g.ticker}</span>
+                            <span style={{ color: "#34d399" }}>+{formatMoney(g.change)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {d.losers.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#f87171", marginBottom: 4, textTransform: "uppercase" }}>Top Losers</div>
+                        {d.losers.map((l) => (
+                          <div key={l.ticker} style={{ display: "flex", justifyContent: "space-between", padding: "1px 0" }}>
+                            <span style={{ fontWeight: 600 }}>{l.ticker}</span>
+                            <span style={{ color: "#f87171" }}>{formatMoney(l.change)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {d.gainers.length === 0 && d.losers.length === 0 && (
+                      <div style={{ color: t.textDim, fontSize: 11 }}>Per-ticker data not yet available for this day.</div>
+                    )}
+                  </div>
+                );
+              }} />
               <Bar dataKey="pl" radius={[4, 4, 0, 0]}>
                 {plChartData.map((d, i) => (
                   <Cell key={i} fill={d.fill} />
@@ -1499,76 +1446,6 @@ export default function App() {
             </div>
           </div>
         )}
-      </div>
-
-      {/* News & Earnings Row */}
-      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "2fr 1fr", gap: 16, marginBottom: 24 }}>
-        {/* News Feed */}
-        <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text, display: "flex", alignItems: "center", gap: 8 }}>
-            <Newspaper size={16} /> News Feed
-          </h3>
-          {newsLoading ? (
-            <div style={{ color: t.textDim, fontSize: 13, padding: "20px 0" }}>Loading news...</div>
-          ) : news.length === 0 ? (
-            <div style={{ color: t.textDim, fontSize: 13, padding: "20px 0" }}>No recent news available.</div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 340, overflowY: "auto" }}>
-              {news.map((n, i) => (
-                <a key={i} href={n.url} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none", display: "block", padding: 12, borderRadius: 10, background: t.hoverBg, border: `1px solid ${t.cardBorder}`, transition: "background 0.15s" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: t.textBold, lineHeight: 1.4, marginBottom: 4 }}>{n.headline}</div>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11, color: t.textDim }}>
-                        <span style={{ background: t.tickerBadgeBg, padding: "2px 8px", borderRadius: 6, fontWeight: 700, fontSize: 11, color: t.textBold }}>{n.ticker}</span>
-                        <span>{n.source}</span>
-                        <span style={{ opacity: 0.5 }}>{"\u00B7"}</span>
-                        <span>{new Date(n.datetime * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
-                      </div>
-                    </div>
-                    <ExternalLink size={14} style={{ color: t.textDim, flexShrink: 0, marginTop: 2 }} />
-                  </div>
-                </a>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Earnings Calendar */}
-        <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text, display: "flex", alignItems: "center", gap: 8 }}>
-            <Calendar size={16} /> Earnings Calendar
-          </h3>
-          {earningsLoading ? (
-            <div style={{ color: t.textDim, fontSize: 13, padding: "20px 0" }}>Loading earnings data...</div>
-          ) : earnings.length === 0 ? (
-            <div style={{ color: t.textDim, fontSize: 13, padding: "20px 0" }}>No upcoming earnings found.</div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 340, overflowY: "auto" }}>
-              {earnings.map((e, i) => {
-                const daysUntil = Math.ceil((new Date(e.date + "T00:00:00").getTime() - Date.now()) / 86400000);
-                const isWithin7 = daysUntil >= 0 && daysUntil <= 7;
-                return (
-                  <div key={i} style={{ padding: 10, borderRadius: 10, background: isWithin7 ? "rgba(251,191,36,0.1)" : t.hoverBg, border: `1px solid ${isWithin7 ? "rgba(251,191,36,0.3)" : t.cardBorder}` }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ background: t.tickerBadgeBg, padding: "3px 10px", borderRadius: 8, fontSize: 13, fontWeight: 700, color: t.textBold }}>{e.symbol}</span>
-                      <span style={{ fontSize: 12, color: isWithin7 ? "#fbbf24" : t.textMuted, fontWeight: isWithin7 ? 700 : 500 }}>
-                        {new Date(e.date + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                        {isWithin7 && ` (${daysUntil === 0 ? "Today" : daysUntil === 1 ? "Tomorrow" : `in ${daysUntil}d`})`}
-                      </span>
-                    </div>
-                    {(e.hour || e.epsEstimate !== null) && (
-                      <div style={{ fontSize: 11, color: t.textDim, marginTop: 4 }}>
-                        {e.hour === "bmo" ? "Before market open" : e.hour === "amc" ? "After market close" : e.hour}
-                        {e.epsEstimate !== null && `${e.hour ? " \u00B7 " : ""}EPS est: $${e.epsEstimate}`}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
       </div>
 
       {/* Account Breakdown Bar */}
