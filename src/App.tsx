@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid, BarChart, Bar, ReferenceLine } from "recharts";
-import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2, Sun, Moon, Calendar, Newspaper, ExternalLink } from "lucide-react";
+import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2, Sun, Moon, Calendar, Newspaper, ExternalLink, Bell, Calculator, LayoutGrid, Table2 } from "lucide-react";
 import * as Papa from "papaparse";
 import confetti from "canvas-confetti";
 
@@ -36,6 +36,18 @@ const fetchFinnhubQuote = async (displayTicker: string): Promise<{ price: number
     console.error(`[Finnhub] ${displayTicker} (${apiSymbol}): fetch error`, err);
     return null;
   }
+};
+
+const fetchSPYReturn = async (): Promise<number | null> => {
+  const to = Math.floor(Date.now() / 1000);
+  const from = to - 365 * 86400;
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=SPY&resolution=W&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.s !== "ok" || !data.c || data.c.length < 2) return null;
+    return ((data.c[data.c.length - 1] - data.c[0]) / data.c[0]) * 100;
+  } catch { return null; }
 };
 
 // ── Theme ──
@@ -176,11 +188,11 @@ const formatPct = (n: number | undefined | null) => {
 // ── Mood ──
 
 const getMood = (plPct: number): { emoji: string; text: string } => {
-  if (plPct >= 5) return { emoji: "🚀", text: "To the moon!" };
-  if (plPct >= 1) return { emoji: "😄", text: "Feeling good!" };
-  if (plPct >= -1) return { emoji: "😐", text: "Meh." };
-  if (plPct >= -5) return { emoji: "😰", text: "This is fine..." };
-  return { emoji: "💀", text: "Pain." };
+  if (plPct >= 5) return { emoji: "\u{1F680}", text: "To the moon!" };
+  if (plPct >= 1) return { emoji: "\u{1F604}", text: "Feeling good!" };
+  if (plPct >= -1) return { emoji: "\u{1F610}", text: "Meh." };
+  if (plPct >= -5) return { emoji: "\u{1F630}", text: "This is fine..." };
+  return { emoji: "\u{1F480}", text: "Pain." };
 };
 
 // ── Sparkline ──
@@ -239,6 +251,14 @@ interface EarningsEvent {
   hour: string;
   epsEstimate: number | null;
   revenueEstimate: number | null;
+}
+
+interface PriceAlert {
+  id: number;
+  ticker: string;
+  targetPrice: number;
+  direction: "above" | "below";
+  triggered: boolean;
 }
 
 // ── Default Positions ──
@@ -323,6 +343,69 @@ const saveDailyPLEntry = (value: number) => {
   } catch {}
 };
 
+const ALERTS_KEY = "portfolio-alerts";
+const loadAlerts = (): PriceAlert[] => {
+  try { const s = localStorage.getItem(ALERTS_KEY); if (s) return JSON.parse(s); } catch {}
+  return [];
+};
+const saveAlertsList = (alerts: PriceAlert[]) => {
+  try { localStorage.setItem(ALERTS_KEY, JSON.stringify(alerts)); } catch {}
+};
+
+// ── Treemap ──
+
+const plColor = (pct: number): string => {
+  if (pct >= 50) return "#15803d";
+  if (pct >= 20) return "#16a34a";
+  if (pct >= 5) return "#22c55e";
+  if (pct >= 0) return "#4ade80";
+  if (pct >= -5) return "#f87171";
+  if (pct >= -20) return "#ef4444";
+  if (pct >= -50) return "#dc2626";
+  return "#991b1b";
+};
+
+interface TreemapRect {
+  x: number; y: number; w: number; h: number;
+  ticker: string; value: number; plPct: number;
+}
+
+const computeTreemap = (items: { ticker: string; value: number; plPct: number }[], width: number, height: number): TreemapRect[] => {
+  if (items.length === 0) return [];
+  const sorted = [...items].sort((a, b) => b.value - a.value);
+  const rects: TreemapRect[] = [];
+
+  const layoutSlice = (items: typeof sorted, x: number, y: number, w: number, h: number) => {
+    if (items.length === 0) return;
+    if (items.length === 1) {
+      rects.push({ x, y, w, h, ticker: items[0].ticker, value: items[0].value, plPct: items[0].plPct });
+      return;
+    }
+    const total = items.reduce((s, i) => s + i.value, 0);
+    if (total === 0) return;
+    const isHoriz = w >= h;
+    let sum = 0;
+    let splitIdx = 1;
+    for (let i = 0; i < items.length - 1; i++) {
+      sum += items[i].value;
+      if (sum >= total / 2) { splitIdx = i + 1; break; }
+    }
+    const first = items.slice(0, splitIdx);
+    const second = items.slice(splitIdx);
+    const ratio = first.reduce((s, i) => s + i.value, 0) / total;
+    if (isHoriz) {
+      layoutSlice(first, x, y, w * ratio, h);
+      layoutSlice(second, x + w * ratio, y, w * (1 - ratio), h);
+    } else {
+      layoutSlice(first, x, y, w, h * ratio);
+      layoutSlice(second, x, y + h * ratio, w, h * (1 - ratio));
+    }
+  };
+
+  layoutSlice(sorted, 0, 0, width, height);
+  return rects;
+};
+
 const basePrices: Record<string, number> = {
   AAPL: 192.5, MSFT: 415.8, GOOGL: 155.2, AMZN: 190.4,
   NVDA: 520.3, TSLA: 260.1, META: 510.2, SPY: 525.6,
@@ -350,6 +433,15 @@ export default function App() {
   const [newsLoading, setNewsLoading] = useState(true);
   const [earningsLoading, setEarningsLoading] = useState(true);
   const [dailyPLData, setDailyPLData] = useState<Record<string, number>>(loadDailyPLStore);
+
+  // Round 3 state
+  const [viewMode, setViewMode] = useState<"table" | "treemap">("table");
+  const [alerts, setAlerts] = useState<PriceAlert[]>(loadAlerts);
+  const [alertBanner, setAlertBanner] = useState<string | null>(null);
+  const [showAlertModal, setShowAlertModal] = useState<string | null>(null);
+  const [alertTarget, setAlertTarget] = useState<{ price: string; direction: "above" | "below" }>({ price: "", direction: "above" });
+  const [spyReturn, setSPYReturn] = useState<number | null>(null);
+  const [whatIf, setWhatIf] = useState({ ticker: "", shares: "", price: "" });
 
   const t = themeMode === "dark" ? darkTheme : lightTheme;
 
@@ -615,6 +707,78 @@ export default function App() {
     });
   }, [dailyPLData]);
 
+  // ── S&P 500 Comparison ──
+  const spyFetched = useRef(false);
+  useEffect(() => {
+    if (spyFetched.current) return;
+    spyFetched.current = true;
+    fetchSPYReturn().then(setSPYReturn);
+  }, []);
+
+  // ── Alert Checking ──
+  useEffect(() => {
+    if (alerts.length === 0) return;
+    let changed = false;
+    const updated = alerts.map((a) => {
+      if (a.triggered) return a;
+      const price = prices[a.ticker]?.current;
+      if (!price) return a;
+      const hit = a.direction === "above" ? price >= a.targetPrice : price <= a.targetPrice;
+      if (hit) {
+        changed = true;
+        const msg = `${a.ticker} hit ${a.direction === "above" ? "above" : "below"} target: ${formatMoney(a.targetPrice)} (now ${formatMoney(price)})`;
+        setAlertBanner(msg);
+        setTimeout(() => setAlertBanner(null), 10000);
+        if (typeof Notification !== "undefined") {
+          if (Notification.permission === "granted") {
+            new Notification("Price Alert", { body: msg });
+          } else if (Notification.permission !== "denied") {
+            Notification.requestPermission();
+          }
+        }
+        return { ...a, triggered: true };
+      }
+      return a;
+    });
+    if (changed) setAlerts(updated);
+  }, [prices, alerts]);
+
+  // Persist alerts
+  useEffect(() => { saveAlertsList(alerts); }, [alerts]);
+
+  // ── What-if Calculation ──
+  const whatIfResult = useMemo(() => {
+    const tk = whatIf.ticker.toUpperCase();
+    const sh = parseFloat(whatIf.shares);
+    const pr = parseFloat(whatIf.price);
+    if (!tk || isNaN(sh) || isNaN(pr) || sh <= 0 || pr <= 0) return null;
+    const tradeCost = sh * pr;
+    const newCost = totalCost + tradeCost;
+    const currentPrice = prices[tk]?.current || pr;
+    const newValue = totalValue + sh * currentPrice;
+    const newPL = newValue - newCost;
+    const newPLPct = newCost > 0 ? (newPL / newCost) * 100 : 0;
+    return { currentTotal: totalValue, currentCost: totalCost, currentPL: totalPL, currentPLPct: totalPLPct, newValue, newCost, newPL, newPLPct, tradeCost };
+  }, [whatIf, totalValue, totalCost, totalPL, totalPLPct, prices]);
+
+  // ── Treemap Data ──
+  const treemapData = useMemo(() => {
+    const byTicker: Record<string, { value: number; cost: number }> = {};
+    filtered.forEach((p) => {
+      const price = prices[p.ticker]?.current || 0;
+      const value = price * p.shares;
+      const cost = p.avgCost * p.shares;
+      if (!byTicker[p.ticker]) byTicker[p.ticker] = { value: 0, cost: 0 };
+      byTicker[p.ticker].value += value;
+      byTicker[p.ticker].cost += cost;
+    });
+    return Object.entries(byTicker)
+      .map(([ticker, { value, cost }]) => ({ ticker, value, plPct: cost > 0 ? ((value - cost) / cost) * 100 : 0 }))
+      .filter((d) => d.value > 0);
+  }, [filtered, prices]);
+
+  const treemapRects = useMemo(() => computeTreemap(treemapData, 100, 100), [treemapData]);
+
   const handleAdd = () => {
     if (!newPos.ticker || !newPos.shares || !newPos.avgCost) return;
     setPositions((prev) => [
@@ -649,6 +813,25 @@ export default function App() {
 
   const removePosition = (id: number) => setPositions((prev) => prev.filter((p) => p.id !== id));
 
+  const handleAddAlert = () => {
+    if (!showAlertModal || !alertTarget.price) return;
+    const newAlert: PriceAlert = {
+      id: Date.now(),
+      ticker: showAlertModal,
+      targetPrice: parseFloat(alertTarget.price),
+      direction: alertTarget.direction,
+      triggered: false,
+    };
+    setAlerts((prev) => [...prev, newAlert]);
+    setShowAlertModal(null);
+    setAlertTarget({ price: "", direction: "above" });
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  };
+
+  const removeAlert = (id: number) => setAlerts((prev) => prev.filter((a) => a.id !== id));
+
   const PerformerCard = ({ items, label, icon }: { items: { ticker: string; plPct: number; price: number }[]; label: string; icon: string }) => (
     <div style={{ flex: 1, background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
       <h3 style={{ margin: "0 0 14px", fontSize: 15, fontWeight: 700, color: t.text }}>{icon} {label}</h3>
@@ -670,15 +853,24 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", background: t.pageBg, color: t.text, fontFamily: "'Inter', system-ui, sans-serif", padding: "24px" }}>
+      {/* Alert Banner */}
+      {alertBanner && (
+        <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", zIndex: 100, background: "linear-gradient(135deg, #fbbf24, #f59e0b)", color: "#000", padding: "12px 24px", borderRadius: 14, fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", gap: 10, boxShadow: "0 8px 30px rgba(251,191,36,0.3)", maxWidth: "90vw" }}>
+          <Bell size={18} />
+          <span style={{ flex: 1 }}>{alertBanner}</span>
+          <button onClick={() => setAlertBanner(null)} style={{ background: "none", border: "none", color: "#000", cursor: "pointer", padding: 2, flexShrink: 0 }}><X size={16} /></button>
+        </div>
+      )}
+
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 28 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <div>
             <h1 style={{ fontSize: 28, fontWeight: 800, background: "linear-gradient(90deg, #f472b6, #a78bfa, #60a5fa)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", margin: 0 }}>
-              📊 My Portfolio Tracker
+              {"\u{1F4CA}"} My Portfolio Tracker
             </h1>
             <p style={{ color: t.textMuted, margin: "4px 0 0", fontSize: 13 }}>
-              {dataSource === "live" ? "Finnhub live prices" : dataSource === "simulated" ? "Simulated prices (API fallback)" : "Connecting to Finnhub..."} update every 30s • <span style={{ color: dataSource === "live" ? "#4ade80" : dataSource === "simulated" ? "#fbbf24" : t.textMuted }}>●</span> {dataSource === "live" ? "Live" : dataSource === "simulated" ? "Simulated" : "..."}
+              {dataSource === "live" ? "Finnhub live prices" : dataSource === "simulated" ? "Simulated prices (API fallback)" : "Connecting to Finnhub..."} update every 30s {"\u2022"} <span style={{ color: dataSource === "live" ? "#4ade80" : dataSource === "simulated" ? "#fbbf24" : t.textMuted }}>{"\u25CF"}</span> {dataSource === "live" ? "Live" : dataSource === "simulated" ? "Simulated" : "..."}
             </p>
           </div>
           {/* Mood */}
@@ -747,11 +939,38 @@ export default function App() {
         </div>
       </div>
 
+      {/* S&P 500 Comparison */}
+      {spyReturn !== null && (
+        <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F4CA}"} Portfolio vs S&P 500</h3>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-around", flexWrap: "wrap", gap: 16 }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 13, color: t.textMuted, marginBottom: 8, fontWeight: 600 }}>Your Portfolio</div>
+              <div style={{ fontSize: 32, fontWeight: 800, color: totalPLPct >= 0 ? "#34d399" : "#f87171" }}>{formatPct(totalPLPct)}</div>
+            </div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: t.textDim }}>vs</div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 13, color: t.textMuted, marginBottom: 8, fontWeight: 600 }}>S&P 500 (1Y)</div>
+              <div style={{ fontSize: 32, fontWeight: 800, color: spyReturn >= 0 ? "#34d399" : "#f87171" }}>{formatPct(spyReturn)}</div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 20px", borderRadius: 14, background: totalPLPct > spyReturn ? "rgba(52,211,153,0.12)" : "rgba(248,113,113,0.12)", border: `1px solid ${totalPLPct > spyReturn ? "rgba(52,211,153,0.2)" : "rgba(248,113,113,0.2)"}` }}>
+              {totalPLPct > spyReturn ? <TrendingUp size={20} color="#34d399" /> : <TrendingDown size={20} color="#f87171" />}
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: totalPLPct > spyReturn ? "#34d399" : "#f87171" }}>
+                  {totalPLPct > spyReturn ? "Beating" : "Trailing"} the market
+                </div>
+                <div style={{ fontSize: 12, color: t.textMuted }}>by {formatPct(Math.abs(totalPLPct - spyReturn))}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Charts Row */}
       <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr 1fr", gap: 16, marginBottom: 24 }}>
         {/* Portfolio Value Chart */}
         <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>📈 Portfolio Value</h3>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F4C8}"} Portfolio Value</h3>
           {portfolioHistory.length === 0 ? (
             <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>
               No history yet — chart will grow as daily snapshots are recorded.
@@ -777,7 +996,7 @@ export default function App() {
 
         {/* Allocation Pie */}
         <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>🎯 Allocation</h3>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F3AF}"} Allocation</h3>
           <ResponsiveContainer width="100%" height={160}>
             <PieChart>
               <Pie data={pieData} cx="50%" cy="50%" innerRadius={45} outerRadius={70} dataKey="value" stroke="none">
@@ -800,7 +1019,7 @@ export default function App() {
 
         {/* Sector Breakdown */}
         <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>🏭 Sectors</h3>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F3ED}"} Sectors</h3>
           <ResponsiveContainer width="100%" height={160}>
             <PieChart>
               <Pie data={sectorData} cx="50%" cy="50%" innerRadius={45} outerRadius={70} dataKey="value" stroke="none">
@@ -824,13 +1043,13 @@ export default function App() {
 
       {/* Best / Worst Performers */}
       <div style={{ display: "flex", gap: 16, marginBottom: 24 }}>
-        <PerformerCard items={gainers} label="Top Gainers" icon="🔥" />
-        <PerformerCard items={losers} label="Top Losers" icon="📉" />
+        <PerformerCard items={gainers} label="Top Gainers" icon={"\u{1F525}"} />
+        <PerformerCard items={losers} label="Top Losers" icon={"\u{1F4C9}"} />
       </div>
 
       {/* Daily P&L Bar Chart */}
       <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
-        <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>📊 Daily P&L</h3>
+        <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F4CA}"} Daily P&L</h3>
         {plChartData.length === 0 ? (
           <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>
             P&L tracking starts today — bars will appear as daily data accumulates.
@@ -874,7 +1093,7 @@ export default function App() {
                       <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11, color: t.textDim }}>
                         <span style={{ background: t.tickerBadgeBg, padding: "2px 8px", borderRadius: 6, fontWeight: 700, fontSize: 11, color: t.textBold }}>{n.ticker}</span>
                         <span>{n.source}</span>
-                        <span style={{ opacity: 0.5 }}>·</span>
+                        <span style={{ opacity: 0.5 }}>{"\u00B7"}</span>
                         <span>{new Date(n.datetime * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
                       </div>
                     </div>
@@ -912,7 +1131,7 @@ export default function App() {
                     {(e.hour || e.epsEstimate !== null) && (
                       <div style={{ fontSize: 11, color: t.textDim, marginTop: 4 }}>
                         {e.hour === "bmo" ? "Before market open" : e.hour === "amc" ? "After market close" : e.hour}
-                        {e.epsEstimate !== null && `${e.hour ? " · " : ""}EPS est: $${e.epsEstimate}`}
+                        {e.epsEstimate !== null && `${e.hour ? " \u00B7 " : ""}EPS est: $${e.epsEstimate}`}
                       </div>
                     )}
                   </div>
@@ -926,7 +1145,7 @@ export default function App() {
       {/* Account Breakdown Bar */}
       {selectedAccount === "All" && accountBreakdown.length > 0 && (
         <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>🏦 Account Breakdown</h3>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F3E6}"} Account Breakdown</h3>
           <div style={{ display: "flex", gap: 12 }}>
             {accountBreakdown.map((acc) => {
               const pct = totalValue > 0 ? ((acc.value / totalValue) * 100).toFixed(1) : "0";
@@ -945,65 +1164,162 @@ export default function App() {
         </div>
       )}
 
-      {/* Positions Table */}
-      <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
-        <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>💼 Positions</h3>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-              <tr style={{ borderBottom: `1px solid ${t.gridStroke}` }}>
-                {["Ticker", "Account", "Shares", "Avg Cost", "Price", "Market Value", "P&L", "P&L %", ""].map((h) => (
-                  <th key={h} style={{ textAlign: "left", padding: "10px 12px", color: t.textDim, fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((p) => {
-                const price = prices[p.ticker]?.current || 0;
-                const value = price * p.shares;
-                const pl = value - p.avgCost * p.shares;
-                const plPct = p.avgCost > 0 ? (pl / (p.avgCost * p.shares)) * 100 : 0;
-                const isUp = pl >= 0;
-                return (
-                  <tr key={p.id} style={{ borderBottom: `1px solid ${t.gridStroke}11`, transition: "background 0.15s" }} onMouseEnter={(e) => (e.currentTarget.style.background = t.hoverBg)} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                    <td style={{ padding: "12px", fontWeight: 700, color: t.textBold }}>
-                      <span style={{ background: t.tickerBadgeBg, padding: "3px 10px", borderRadius: 8, fontSize: 13 }}>{p.ticker}</span>
-                    </td>
-                    <td style={{ padding: "12px" }}>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: ACCOUNT_COLORS[p.account]?.light || t.textMuted }} />
-                        <span style={{ color: t.textMuted, fontSize: 12 }}>{p.account}</span>
-                      </span>
-                    </td>
-                    <td style={{ padding: "12px", color: t.text }}>{p.shares}</td>
-                    <td style={{ padding: "12px", color: t.textMuted }}>{formatMoney(p.avgCost)}</td>
-                    <td style={{ padding: "12px", color: t.textBold, fontWeight: 600 }}>
-                      {formatMoney(price)}
-                      <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#4ade80", marginLeft: 6, animation: "pulse 2s infinite" }} />
-                    </td>
-                    <td style={{ padding: "12px", color: t.text, fontWeight: 600 }}>{formatMoney(value)}</td>
-                    <td style={{ padding: "12px", color: isUp ? "#34d399" : "#f87171", fontWeight: 700 }}>{formatMoney(pl)}</td>
-                    <td style={{ padding: "12px" }}>
-                      <span style={{ background: isUp ? "rgba(52,211,153,0.15)" : "rgba(248,113,113,0.15)", color: isUp ? "#34d399" : "#f87171", padding: "3px 10px", borderRadius: 20, fontWeight: 700, fontSize: 12 }}>
-                        {formatPct(plPct)}
-                      </span>
-                    </td>
-                    <td style={{ padding: "12px" }}>
-                      <button onClick={(e) => { e.stopPropagation(); removePosition(p.id); }} style={{ background: "none", border: "none", color: t.textDim, cursor: "pointer", padding: 4 }} title="Remove">
-                        <Trash2 size={14} />
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          {filtered.length === 0 && (
-            <div style={{ textAlign: "center", padding: 40, color: t.textDim }}>
-              No positions yet. Click "Add Position" or "Import CSV" to get started! 🚀
-            </div>
-          )}
+      {/* What-if Calculator */}
+      <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
+        <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text, display: "flex", alignItems: "center", gap: 8 }}>
+          <Calculator size={16} /> What-if Calculator
+        </h3>
+        <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 120 }}>
+            <label style={{ display: "block", fontSize: 11, color: t.textDim, marginBottom: 4, fontWeight: 600, textTransform: "uppercase" }}>Ticker</label>
+            <input value={whatIf.ticker} onChange={(e) => setWhatIf({ ...whatIf, ticker: e.target.value })} placeholder="e.g. AAPL" style={{ width: "100%", padding: "8px 12px", borderRadius: 10, border: `1px solid ${t.inputBorder}`, background: t.inputBg, color: t.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ flex: 1, minWidth: 120 }}>
+            <label style={{ display: "block", fontSize: 11, color: t.textDim, marginBottom: 4, fontWeight: 600, textTransform: "uppercase" }}>Shares</label>
+            <input value={whatIf.shares} onChange={(e) => setWhatIf({ ...whatIf, shares: e.target.value })} placeholder="e.g. 100" type="number" style={{ width: "100%", padding: "8px 12px", borderRadius: 10, border: `1px solid ${t.inputBorder}`, background: t.inputBg, color: t.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ flex: 1, minWidth: 120 }}>
+            <label style={{ display: "block", fontSize: 11, color: t.textDim, marginBottom: 4, fontWeight: 600, textTransform: "uppercase" }}>Buy Price</label>
+            <input value={whatIf.price} onChange={(e) => setWhatIf({ ...whatIf, price: e.target.value })} placeholder="e.g. 150.00" type="number" style={{ width: "100%", padding: "8px 12px", borderRadius: 10, border: `1px solid ${t.inputBorder}`, background: t.inputBg, color: t.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+          </div>
         </div>
+        {whatIfResult ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 16, alignItems: "center" }}>
+            <div style={{ background: t.hoverBg, borderRadius: 12, padding: 16, border: `1px solid ${t.cardBorder}` }}>
+              <div style={{ fontSize: 12, color: t.textDim, marginBottom: 8, fontWeight: 600, textTransform: "uppercase" }}>Before</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: t.textBold, marginBottom: 4 }}>{formatMoney(whatIfResult.currentTotal)}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: whatIfResult.currentPL >= 0 ? "#34d399" : "#f87171" }}>
+                {formatMoney(whatIfResult.currentPL)} ({formatPct(whatIfResult.currentPLPct)})
+              </div>
+            </div>
+            <div style={{ fontSize: 24, color: t.textDim }}>{"\u2192"}</div>
+            <div style={{ background: t.hoverBg, borderRadius: 12, padding: 16, border: `1px solid ${t.cardBorder}` }}>
+              <div style={{ fontSize: 12, color: t.textDim, marginBottom: 8, fontWeight: 600, textTransform: "uppercase" }}>After (+{whatIf.shares} {whatIf.ticker.toUpperCase()})</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: t.textBold, marginBottom: 4 }}>{formatMoney(whatIfResult.newValue)}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: whatIfResult.newPL >= 0 ? "#34d399" : "#f87171" }}>
+                {formatMoney(whatIfResult.newPL)} ({formatPct(whatIfResult.newPLPct)})
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: t.textDim, fontSize: 13, textAlign: "center", padding: "8px 0" }}>
+            Enter a ticker, shares, and buy price to see the impact on your portfolio.
+          </div>
+        )}
+      </div>
+
+      {/* Positions Table / Treemap */}
+      <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F4BC}"} Positions</h3>
+          <div style={{ display: "flex", gap: 4, background: t.pillBg, borderRadius: 10, padding: 3, border: `1px solid ${t.pillBorder}` }}>
+            <button onClick={() => setViewMode("table")} style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 12px", borderRadius: 8, border: "none", background: viewMode === "table" ? "linear-gradient(135deg, #a78bfa, #f472b6)" : "transparent", color: viewMode === "table" ? "#fff" : t.textMuted, cursor: "pointer", fontSize: 12, fontWeight: 600, transition: "all 0.2s" }}>
+              <Table2 size={13} /> Table
+            </button>
+            <button onClick={() => setViewMode("treemap")} style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 12px", borderRadius: 8, border: "none", background: viewMode === "treemap" ? "linear-gradient(135deg, #a78bfa, #f472b6)" : "transparent", color: viewMode === "treemap" ? "#fff" : t.textMuted, cursor: "pointer", fontSize: 12, fontWeight: 600, transition: "all 0.2s" }}>
+              <LayoutGrid size={13} /> Treemap
+            </button>
+          </div>
+        </div>
+
+        {viewMode === "treemap" ? (
+          <div style={{ position: "relative", width: "100%", height: 420, borderRadius: 12, overflow: "hidden" }}>
+            {treemapRects.map((r, i) => (
+              <div key={i} style={{
+                position: "absolute",
+                left: `${r.x}%`,
+                top: `${r.y}%`,
+                width: `${r.w}%`,
+                height: `${r.h}%`,
+                background: plColor(r.plPct),
+                border: `1px solid ${themeMode === "dark" ? "rgba(0,0,0,0.3)" : "rgba(255,255,255,0.5)"}`,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                overflow: "hidden",
+                cursor: "default",
+                transition: "opacity 0.2s",
+                boxSizing: "border-box",
+              }} title={`${r.ticker}: ${formatMoney(r.value)} (${formatPct(r.plPct)})`}
+                onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.8"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
+              >
+                {r.w > 6 && <div style={{ fontWeight: 800, fontSize: r.w > 15 ? 18 : r.w > 10 ? 14 : 11, color: "#fff", textShadow: "0 1px 3px rgba(0,0,0,0.5)", lineHeight: 1.2 }}>{r.ticker}</div>}
+                {r.w > 8 && <div style={{ fontWeight: 600, fontSize: r.w > 15 ? 14 : 11, color: "rgba(255,255,255,0.85)", textShadow: "0 1px 2px rgba(0,0,0,0.5)" }}>{formatPct(r.plPct)}</div>}
+                {r.w > 15 && <div style={{ fontWeight: 500, fontSize: 11, color: "rgba(255,255,255,0.7)", textShadow: "0 1px 2px rgba(0,0,0,0.5)", marginTop: 2 }}>{formatMoney(r.value)}</div>}
+              </div>
+            ))}
+            {treemapRects.length === 0 && (
+              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>
+                No position data to display.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${t.gridStroke}` }}>
+                  {["Ticker", "Account", "Shares", "Avg Cost", "Price", "Market Value", "P&L", "P&L %", "Alert", ""].map((h) => (
+                    <th key={h} style={{ textAlign: "left", padding: "10px 12px", color: t.textDim, fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((p) => {
+                  const price = prices[p.ticker]?.current || 0;
+                  const value = price * p.shares;
+                  const pl = value - p.avgCost * p.shares;
+                  const plPct = p.avgCost > 0 ? (pl / (p.avgCost * p.shares)) * 100 : 0;
+                  const isUp = pl >= 0;
+                  const hasActiveAlert = alerts.some((a) => a.ticker === p.ticker && !a.triggered);
+                  return (
+                    <tr key={p.id} style={{ borderBottom: `1px solid ${t.gridStroke}11`, transition: "background 0.15s" }} onMouseEnter={(e) => (e.currentTarget.style.background = t.hoverBg)} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+                      <td style={{ padding: "12px", fontWeight: 700, color: t.textBold }}>
+                        <span style={{ background: t.tickerBadgeBg, padding: "3px 10px", borderRadius: 8, fontSize: 13 }}>{p.ticker}</span>
+                      </td>
+                      <td style={{ padding: "12px" }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ width: 8, height: 8, borderRadius: "50%", background: ACCOUNT_COLORS[p.account]?.light || t.textMuted }} />
+                          <span style={{ color: t.textMuted, fontSize: 12 }}>{p.account}</span>
+                        </span>
+                      </td>
+                      <td style={{ padding: "12px", color: t.text }}>{p.shares}</td>
+                      <td style={{ padding: "12px", color: t.textMuted }}>{formatMoney(p.avgCost)}</td>
+                      <td style={{ padding: "12px", color: t.textBold, fontWeight: 600 }}>
+                        {formatMoney(price)}
+                        <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#4ade80", marginLeft: 6, animation: "pulse 2s infinite" }} />
+                      </td>
+                      <td style={{ padding: "12px", color: t.text, fontWeight: 600 }}>{formatMoney(value)}</td>
+                      <td style={{ padding: "12px", color: isUp ? "#34d399" : "#f87171", fontWeight: 700 }}>{formatMoney(pl)}</td>
+                      <td style={{ padding: "12px" }}>
+                        <span style={{ background: isUp ? "rgba(52,211,153,0.15)" : "rgba(248,113,113,0.15)", color: isUp ? "#34d399" : "#f87171", padding: "3px 10px", borderRadius: 20, fontWeight: 700, fontSize: 12 }}>
+                          {formatPct(plPct)}
+                        </span>
+                      </td>
+                      <td style={{ padding: "12px" }}>
+                        <button onClick={(e) => { e.stopPropagation(); setShowAlertModal(p.ticker); setAlertTarget({ price: "", direction: "above" }); }} style={{ background: "none", border: "none", color: hasActiveAlert ? "#fbbf24" : t.textDim, cursor: "pointer", padding: 4 }} title="Set price alert">
+                          <Bell size={14} fill={hasActiveAlert ? "#fbbf24" : "none"} />
+                        </button>
+                      </td>
+                      <td style={{ padding: "12px" }}>
+                        <button onClick={(e) => { e.stopPropagation(); removePosition(p.id); }} style={{ background: "none", border: "none", color: t.textDim, cursor: "pointer", padding: 4 }} title="Remove">
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {filtered.length === 0 && (
+              <div style={{ textAlign: "center", padding: 40, color: t.textDim }}>
+                No positions yet. Click "Add Position" or "Import CSV" to get started! {"\u{1F680}"}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Add Position Modal */}
@@ -1011,7 +1327,7 @@ export default function App() {
         <div style={{ position: "fixed", inset: 0, background: t.overlayBg, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }} onClick={() => setShowAddModal(false)}>
           <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: 380, border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: t.text }}>➕ Add Position</h3>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: t.text }}>{"\u2795"} Add Position</h3>
               <button onClick={() => setShowAddModal(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}><X size={20} /></button>
             </div>
             {[
@@ -1035,7 +1351,7 @@ export default function App() {
               </div>
             </div>
             <button onClick={handleAdd} style={{ width: "100%", padding: "12px 0", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #a78bfa, #f472b6)", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer" }}>
-              Add to Portfolio 🚀
+              Add to Portfolio {"\u{1F680}"}
             </button>
           </div>
         </div>
@@ -1046,7 +1362,7 @@ export default function App() {
         <div style={{ position: "fixed", inset: 0, background: t.overlayBg, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }} onClick={() => setShowCSVModal(false)}>
           <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: 420, border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: t.text }}>📄 Import CSV</h3>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: t.text }}>{"\u{1F4C4}"} Import CSV</h3>
               <button onClick={() => setShowCSVModal(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}><X size={20} /></button>
             </div>
             <p style={{ color: t.textMuted, fontSize: 13, marginBottom: 16, lineHeight: 1.6 }}>
@@ -1060,7 +1376,55 @@ export default function App() {
             </div>
             <input ref={fileRef} type="file" accept=".csv" onChange={handleCSV} style={{ display: "none" }} />
             <button onClick={() => fileRef.current?.click()} style={{ width: "100%", padding: "12px 0", borderRadius: 12, border: `2px dashed ${t.inputBorder}`, background: "transparent", color: "#a78bfa", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>
-              Choose CSV File 📁
+              Choose CSV File {"\u{1F4C1}"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Alert Modal */}
+      {showAlertModal && (
+        <div style={{ position: "fixed", inset: 0, background: t.overlayBg, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }} onClick={() => setShowAlertModal(null)}>
+          <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: 380, border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: t.text }}>{"\u{1F514}"} Price Alert — {showAlertModal}</h3>
+              <button onClick={() => setShowAlertModal(null)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}><X size={20} /></button>
+            </div>
+            {prices[showAlertModal] && (
+              <div style={{ fontSize: 13, color: t.textMuted, marginBottom: 16, padding: "10px 14px", background: t.hoverBg, borderRadius: 10, border: `1px solid ${t.cardBorder}` }}>
+                Current price: <span style={{ fontWeight: 700, color: t.textBold }}>{formatMoney(prices[showAlertModal].current)}</span>
+              </div>
+            )}
+            {alerts.filter((a) => a.ticker === showAlertModal).length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 12, color: t.textDim, marginBottom: 8, fontWeight: 600 }}>Active Alerts</div>
+                {alerts.filter((a) => a.ticker === showAlertModal).map((a) => (
+                  <div key={a.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", borderRadius: 8, background: a.triggered ? "rgba(251,191,36,0.1)" : t.hoverBg, marginBottom: 6, border: `1px solid ${t.cardBorder}` }}>
+                    <span style={{ fontSize: 13, color: a.triggered ? t.textDim : t.text }}>
+                      {a.direction === "above" ? "\u2191 Above" : "\u2193 Below"} {formatMoney(a.targetPrice)}
+                      {a.triggered && <span style={{ marginLeft: 8, fontSize: 11, color: "#fbbf24" }}>Triggered</span>}
+                    </span>
+                    <button onClick={() => removeAlert(a.id)} style={{ background: "none", border: "none", color: t.textDim, cursor: "pointer", padding: 2 }}><X size={14} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 12, color: t.textMuted, marginBottom: 5, fontWeight: 600 }}>Target Price</label>
+              <input value={alertTarget.price} onChange={(e) => setAlertTarget({ ...alertTarget, price: e.target.value })} placeholder="e.g. 200.00" type="number" style={{ width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${t.inputBorder}`, background: t.inputBg, color: t.text, fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+            </div>
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ display: "block", fontSize: 12, color: t.textMuted, marginBottom: 5, fontWeight: 600 }}>Direction</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                {(["above", "below"] as const).map((dir) => (
+                  <button key={dir} onClick={() => setAlertTarget({ ...alertTarget, direction: dir })} style={{ flex: 1, padding: "8px 0", borderRadius: 10, border: alertTarget.direction === dir ? "none" : `1px solid ${t.inputBorder}`, background: alertTarget.direction === dir ? (dir === "above" ? "#22c55e" : "#ef4444") : "transparent", color: alertTarget.direction === dir ? "#fff" : t.textMuted, cursor: "pointer", fontSize: 13, fontWeight: 600, transition: "all 0.2s" }}>
+                    {dir === "above" ? "\u2191 Above" : "\u2193 Below"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button onClick={handleAddAlert} style={{ width: "100%", padding: "12px 0", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #a78bfa, #f472b6)", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer" }}>
+              Set Alert {"\u{1F514}"}
             </button>
           </div>
         </div>
