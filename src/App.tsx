@@ -15,7 +15,6 @@ const FINNHUB_SYMBOLS: Record<string, string> = {
 // Multiply Finnhub price to approximate the display ticker's actual price
 const PRICE_MULTIPLIERS: Record<string, number> = {
   VTSAX: 0.487,
-  KXIAY: 0.1, // 10:1 split not yet reflected on Finnhub
 };
 
 const fetchFinnhubQuote = async (displayTicker: string): Promise<{ price: number; change: number; changePct: number } | null> => {
