@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid, BarChart, Bar, ReferenceLine } from "recharts";
-import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2, Sun, Moon, Calendar, Newspaper, ExternalLink, Bell, Calculator, LayoutGrid, Table2 } from "lucide-react";
+import { TrendingUp, TrendingDown, Plus, Upload, X, DollarSign, BarChart3, Wallet, Trash2, Sun, Moon, Calendar, Newspaper, ExternalLink, Bell, Calculator, LayoutGrid, Table2, FileText } from "lucide-react";
 import * as Papa from "papaparse";
 import confetti from "canvas-confetti";
+import { jsPDF } from "jspdf";
 
 const FINNHUB_API_KEY = "d67t5tpr01qobepj8tb0d67t5tpr01qobepj8tbg";
 
@@ -261,6 +262,28 @@ interface PriceAlert {
   triggered: boolean;
 }
 
+interface BadgeState {
+  firstGreenDay: boolean;
+  fiveBagger: boolean;
+  diamondHands: boolean;
+  quarterMilClub: boolean;
+  diversified: boolean;
+}
+
+const BADGE_DEFS: { key: keyof BadgeState; icon: string; name: string; hint: string; check: (totalPL: number, positions: Position[], prices: Record<string, PriceData>) => boolean }[] = [
+  { key: "firstGreenDay", icon: "\u{1F49A}", name: "First Green Day", hint: "Total P&L goes positive", check: (totalPL) => totalPL > 0 },
+  { key: "fiveBagger", icon: "\u{1F3B0}", name: "Five Bagger", hint: "One position up 400%+", check: (_totalPL, positions, prices) => positions.some(p => { const price = prices[p.ticker]?.current || 0; return p.avgCost > 0 && ((price - p.avgCost) / p.avgCost) * 100 >= 400; }) },
+  { key: "diamondHands", icon: "\u{1F48E}", name: "Diamond Hands", hint: "Hold a position down 20%+", check: (_totalPL, positions, prices) => positions.some(p => { const price = prices[p.ticker]?.current || 0; return p.avgCost > 0 && ((price - p.avgCost) / p.avgCost) * 100 <= -20; }) },
+  { key: "quarterMilClub", icon: "\u{1F3C6}", name: "Quarter Mil Club", hint: "Portfolio value reaches $250k", check: (_totalPL, positions, prices) => { const total = positions.reduce((s, p) => s + (prices[p.ticker]?.current || 0) * p.shares, 0); return total >= 250000; } },
+  { key: "diversified", icon: "\u{1F308}", name: "Diversified", hint: "10+ unique tickers", check: (_totalPL, positions) => new Set(positions.map(p => p.ticker)).size >= 10 },
+];
+
+const BADGES_KEY = "portfolio-badges";
+const loadBadges = (): BadgeState => {
+  try { const s = localStorage.getItem(BADGES_KEY); if (s) return JSON.parse(s); } catch {}
+  return { firstGreenDay: false, fiveBagger: false, diamondHands: false, quarterMilClub: false, diversified: false };
+};
+
 // ── Default Positions ──
 
 const defaultPositions: Position[] = [
@@ -413,6 +436,66 @@ const basePrices: Record<string, number> = {
   V: 280.3, JPM: 198.5, BA: 210.7,
 };
 
+// ── Candle Data ──
+
+const fetchCandleData = async (displayTicker: string, timeframe: string): Promise<{ t: number; c: number }[] | null> => {
+  const apiSymbol = FINNHUB_SYMBOLS[displayTicker] || displayTicker;
+  const resolutionMap: Record<string, string> = { "1D": "5", "5D": "15", "1M": "60", "6M": "D", "1Y": "D" };
+  const rangeMap: Record<string, number> = { "1D": 86400, "5D": 5 * 86400, "1M": 30 * 86400, "6M": 180 * 86400, "1Y": 365 * 86400 };
+  const resolution = resolutionMap[timeframe] || "D";
+  const range = rangeMap[timeframe] || 365 * 86400;
+  const to = Math.floor(Date.now() / 1000);
+  const from = to - range;
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(apiSymbol)}&resolution=${resolution}&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.s !== "ok" || !data.t || !data.c) return null;
+    const mult = PRICE_MULTIPLIERS[displayTicker] || 1;
+    return data.t.map((time: number, i: number) => ({ t: time, c: data.c[i] * mult }));
+  } catch { return null; }
+};
+
+// ── Correlation Helpers ──
+
+const fetchRawCandles = async (displayTicker: string): Promise<number[] | null> => {
+  const apiSymbol = FINNHUB_SYMBOLS[displayTicker] || displayTicker;
+  const to = Math.floor(Date.now() / 1000);
+  const from = to - 30 * 86400;
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(apiSymbol)}&resolution=D&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.s !== "ok" || !data.c) return null;
+    return data.c;
+  } catch { return null; }
+};
+
+const computeDailyReturns = (closes: number[]): number[] => {
+  const returns: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    returns.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+  }
+  return returns;
+};
+
+const computeCorrelation = (a: number[], b: number[]): number => {
+  const n = Math.min(a.length, b.length);
+  if (n < 2) return 0;
+  const meanA = a.slice(0, n).reduce((s, v) => s + v, 0) / n;
+  const meanB = b.slice(0, n).reduce((s, v) => s + v, 0) / n;
+  let cov = 0, varA = 0, varB = 0;
+  for (let i = 0; i < n; i++) {
+    const da = a[i] - meanA;
+    const db = b[i] - meanB;
+    cov += da * db;
+    varA += da * da;
+    varB += db * db;
+  }
+  const denom = Math.sqrt(varA * varB);
+  return denom === 0 ? 0 : cov / denom;
+};
+
 // ── Component ──
 
 export default function App() {
@@ -433,6 +516,17 @@ export default function App() {
   const [newsLoading, setNewsLoading] = useState(true);
   const [earningsLoading, setEarningsLoading] = useState(true);
   const [dailyPLData, setDailyPLData] = useState<Record<string, number>>(loadDailyPLStore);
+
+  // Round 4 state
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const [badges, setBadges] = useState<BadgeState>(loadBadges);
+  const [tickerModal, setTickerModal] = useState<string | null>(null);
+  const [tickerModalTimeframe, setTickerModalTimeframe] = useState("1M");
+  const [candleData, setCandleData] = useState<{ t: number; c: number }[] | null>(null);
+  const [candleLoading, setCandleLoading] = useState(false);
+  const [correlationData, setCorrelationData] = useState<{ tickers: string[]; matrix: number[][] } | null>(null);
+  const [correlationLoading, setCorrelationLoading] = useState(false);
+  const [exportingPDF, setExportingPDF] = useState(false);
 
   // Round 3 state
   const [viewMode, setViewMode] = useState<"table" | "treemap">("table");
@@ -746,6 +840,199 @@ export default function App() {
   // Persist alerts
   useEffect(() => { saveAlertsList(alerts); }, [alerts]);
 
+  // ── Mobile Resize Listener ──
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // ── Badge Checking ──
+  useEffect(() => {
+    if (dataSource !== "live") return;
+    setBadges(prev => {
+      const updated = { ...prev };
+      let changed = false;
+      for (const def of BADGE_DEFS) {
+        if (!updated[def.key] && def.check(totalPL, positions, prices)) {
+          updated[def.key] = true;
+          changed = true;
+        }
+      }
+      if (changed) {
+        try { localStorage.setItem(BADGES_KEY, JSON.stringify(updated)); } catch {}
+      }
+      return changed ? updated : prev;
+    });
+  }, [dataSource, totalPL, positions, prices]);
+
+  // ── Candle Data Fetching ──
+  useEffect(() => {
+    if (!tickerModal) return;
+    setCandleLoading(true);
+    setCandleData(null);
+    fetchCandleData(tickerModal, tickerModalTimeframe).then(data => {
+      setCandleData(data);
+      setCandleLoading(false);
+    });
+  }, [tickerModal, tickerModalTimeframe]);
+
+  // ── Correlation Heatmap ──
+  const correlationFetched = useRef(false);
+  useEffect(() => {
+    if (correlationFetched.current || dataSource !== "live") return;
+    const tickerValues: Record<string, number> = {};
+    positions.forEach(p => {
+      const value = (prices[p.ticker]?.current || 0) * p.shares;
+      tickerValues[p.ticker] = (tickerValues[p.ticker] || 0) + value;
+    });
+    const topTickers = Object.entries(tickerValues)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 10)
+      .map(([ticker]) => ticker);
+    if (topTickers.length < 2) return;
+    correlationFetched.current = true;
+    setCorrelationLoading(true);
+    const doFetch = async () => {
+      const candlesMap: Record<string, number[]> = {};
+      for (const ticker of topTickers) {
+        const closes = await fetchRawCandles(ticker);
+        if (closes) candlesMap[ticker] = closes;
+        await new Promise(r => setTimeout(r, 300));
+      }
+      const validTickers = topTickers.filter(tk => candlesMap[tk]);
+      const returnsMap: Record<string, number[]> = {};
+      validTickers.forEach(tk => { returnsMap[tk] = computeDailyReturns(candlesMap[tk]); });
+      const matrix: number[][] = [];
+      for (let i = 0; i < validTickers.length; i++) {
+        const row: number[] = [];
+        for (let j = 0; j < validTickers.length; j++) {
+          row.push(i === j ? 1 : computeCorrelation(returnsMap[validTickers[i]], returnsMap[validTickers[j]]));
+        }
+        matrix.push(row);
+      }
+      setCorrelationData({ tickers: validTickers, matrix });
+      setCorrelationLoading(false);
+    };
+    doFetch();
+  }, [dataSource, positions, prices]);
+
+  // ── Ticker Detail Helper ──
+  const getTickerDetails = useCallback((ticker: string) => {
+    const tickerPositions = positions.filter(p => p.ticker === ticker);
+    const totalShares = tickerPositions.reduce((s, p) => s + p.shares, 0);
+    const totalCostBasis = tickerPositions.reduce((s, p) => s + p.avgCost * p.shares, 0);
+    const avgCost = totalShares > 0 ? totalCostBasis / totalShares : 0;
+    const currentPrice = prices[ticker]?.current || 0;
+    const marketValue = currentPrice * totalShares;
+    const pl = marketValue - totalCostBasis;
+    const plPct = totalCostBasis > 0 ? (pl / totalCostBasis) * 100 : 0;
+    const sector = SECTOR_MAP[ticker] || "Other";
+    return { ticker, totalShares, avgCost, currentPrice, marketValue, pl, plPct, sector, positions: tickerPositions };
+  }, [positions, prices]);
+
+  // ── PDF Export ──
+  const handleExportPDF = useCallback(() => {
+    setExportingPDF(true);
+    try {
+      const doc = new jsPDF();
+      let y = 20;
+      const pageHeight = 280;
+      const checkPage = (needed: number) => {
+        if (y + needed > pageHeight) { doc.addPage(); y = 20; }
+      };
+      doc.setFontSize(22);
+      doc.setFont("helvetica", "bold");
+      doc.text("Portfolio Report", 14, y);
+      y += 10;
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "normal");
+      doc.text(new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }), 14, y);
+      y += 14;
+
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text("Portfolio Summary", 14, y);
+      y += 8;
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "normal");
+      [`Total Value: ${formatMoney(totalValue)}`, `Total Cost: ${formatMoney(totalCost)}`, `Total P&L: ${formatMoney(totalPL)} (${formatPct(totalPLPct)})`, `Positions: ${positions.length}`].forEach(line => { doc.text(line, 14, y); y += 6; });
+      y += 8;
+
+      checkPage(40);
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text("Top Gainers", 14, y);
+      y += 8;
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "normal");
+      if (gainers.length === 0) { doc.text("No gainers", 14, y); y += 6; }
+      else gainers.forEach(g => { doc.text(`${g.ticker}: ${formatPct(g.plPct)}`, 14, y); y += 6; });
+      y += 4;
+
+      checkPage(40);
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text("Top Losers", 14, y);
+      y += 8;
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "normal");
+      if (losers.length === 0) { doc.text("No losers", 14, y); y += 6; }
+      else losers.forEach(l => { doc.text(`${l.ticker}: ${formatPct(l.plPct)}`, 14, y); y += 6; });
+      y += 8;
+
+      checkPage(60);
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text("Sector Breakdown", 14, y);
+      y += 8;
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "normal");
+      const sectorTotal = sectorData.reduce((s, d) => s + d.value, 0);
+      sectorData.forEach(s => {
+        const pct = sectorTotal > 0 ? ((s.value / sectorTotal) * 100).toFixed(1) : "0";
+        doc.text(`${s.name}: ${formatMoney(s.value)} (${pct}%)`, 14, y);
+        y += 6;
+      });
+      y += 8;
+
+      checkPage(20);
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text("All Positions", 14, y);
+      y += 8;
+      doc.setFontSize(9);
+      doc.setFont("helvetica", "bold");
+      const cols = [14, 40, 65, 85, 110, 140, 170];
+      ["Ticker", "Account", "Shares", "Avg Cost", "Price", "Value", "P&L %"].forEach((h, i) => doc.text(h, cols[i], y));
+      y += 2;
+      doc.setDrawColor(200);
+      doc.line(14, y, 196, y);
+      y += 4;
+
+      doc.setFont("helvetica", "normal");
+      positions.forEach(p => {
+        checkPage(8);
+        const price = prices[p.ticker]?.current || 0;
+        const value = price * p.shares;
+        const plPctVal = p.avgCost > 0 ? ((price - p.avgCost) / p.avgCost) * 100 : 0;
+        doc.text(p.ticker, cols[0], y);
+        doc.text(p.account, cols[1], y);
+        doc.text(p.shares.toFixed(2), cols[2], y);
+        doc.text(formatMoney(p.avgCost), cols[3], y);
+        doc.text(formatMoney(price), cols[4], y);
+        doc.text(formatMoney(value), cols[5], y);
+        doc.text(formatPct(plPctVal), cols[6], y);
+        y += 6;
+      });
+
+      doc.save("portfolio-report.pdf");
+    } catch (err) {
+      console.error("PDF export error:", err);
+    }
+    setExportingPDF(false);
+  }, [totalValue, totalCost, totalPL, totalPLPct, positions, prices, gainers, losers, sectorData]);
+
   // ── What-if Calculation ──
   const whatIfResult = useMemo(() => {
     const tk = whatIf.ticker.toUpperCase();
@@ -863,10 +1150,10 @@ export default function App() {
       )}
 
       {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 28 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+      <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "stretch" : "center", marginBottom: 28, gap: isMobile ? 16 : 0 }}>
+        <div style={{ display: "flex", alignItems: isMobile ? "flex-start" : "center", gap: 14, flexDirection: isMobile ? "column" : "row" }}>
           <div>
-            <h1 style={{ fontSize: 28, fontWeight: 800, background: "linear-gradient(90deg, #f472b6, #a78bfa, #60a5fa)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", margin: 0 }}>
+            <h1 style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, background: "linear-gradient(90deg, #f472b6, #a78bfa, #60a5fa)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", margin: 0 }}>
               {"\u{1F4CA}"} My Portfolio Tracker
             </h1>
             <p style={{ color: t.textMuted, margin: "4px 0 0", fontSize: 13 }}>
@@ -875,18 +1162,21 @@ export default function App() {
           </div>
           {/* Mood */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: t.cardBg, border: `1px solid ${t.cardBorder}`, borderRadius: 14, padding: "8px 16px", boxShadow: t.shadow }}>
-            <span style={{ fontSize: 28, animation: "mood-bounce 2s ease-in-out infinite" }}>{mood.emoji}</span>
+            <span style={{ fontSize: isMobile ? 22 : 28, animation: "mood-bounce 2s ease-in-out infinite" }}>{mood.emoji}</span>
             <span style={{ fontSize: 13, fontWeight: 600, color: t.textMuted, fontStyle: "italic" }}>{mood.text}</span>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <button onClick={() => setThemeMode((m) => m === "dark" ? "light" : "dark")} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 38, height: 38, borderRadius: 12, border: `1px solid ${t.pillBorder}`, background: t.pillBg, color: t.text, cursor: "pointer" }} title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: isMobile ? "center" : "flex-end", flexWrap: "wrap" }}>
+          <button onClick={() => setThemeMode((m) => m === "dark" ? "light" : "dark")} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 38, height: isMobile ? 44 : 38, borderRadius: 12, border: `1px solid ${t.pillBorder}`, background: t.pillBg, color: t.text, cursor: "pointer" }} title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}>
             {themeMode === "dark" ? <Sun size={16} /> : <Moon size={16} />}
           </button>
-          <button onClick={() => setShowCSVModal(true)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 12, border: `1px solid ${t.pillBorder}`, background: t.pillBg, color: t.text, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+          <button onClick={handleExportPDF} disabled={exportingPDF} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 12, border: `1px solid ${t.pillBorder}`, background: t.pillBg, color: t.text, cursor: "pointer", fontSize: 13, fontWeight: 600, minHeight: isMobile ? 44 : undefined, opacity: exportingPDF ? 0.6 : 1 }}>
+            <FileText size={15} /> {exportingPDF ? "Exporting..." : "Export PDF"}
+          </button>
+          <button onClick={() => setShowCSVModal(true)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 12, border: `1px solid ${t.pillBorder}`, background: t.pillBg, color: t.text, cursor: "pointer", fontSize: 13, fontWeight: 600, minHeight: isMobile ? 44 : undefined }}>
             <Upload size={15} /> Import CSV
           </button>
-          <button onClick={() => setShowAddModal(true)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #a78bfa, #f472b6)", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>
+          <button onClick={() => setShowAddModal(true)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #a78bfa, #f472b6)", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 700, minHeight: isMobile ? 44 : undefined }}>
             <Plus size={15} /> Add Position
           </button>
         </div>
@@ -902,39 +1192,39 @@ export default function App() {
       </div>
 
       {/* Top Stats Cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16, marginBottom: 24 }}>
-        <div style={{ background: "linear-gradient(135deg, rgba(168,139,250,0.15), rgba(244,114,182,0.08))", borderRadius: 16, padding: 20, border: "1px solid rgba(168,139,250,0.2)", boxShadow: t.shadow }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(auto-fit, minmax(200px, 1fr))", gap: 16, marginBottom: 24 }}>
+        <div style={{ background: "linear-gradient(135deg, rgba(168,139,250,0.15), rgba(244,114,182,0.08))", borderRadius: 16, padding: isMobile ? 14 : 20, border: "1px solid rgba(168,139,250,0.2)", boxShadow: t.shadow }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
             <Wallet size={18} color="#a78bfa" />
             <span style={{ color: t.textMuted, fontSize: 13, fontWeight: 500 }}>Total Value</span>
           </div>
-          <div style={{ fontSize: 28, fontWeight: 800, color: t.textBold }}>{formatMoney(totalValue)}</div>
+          <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color: t.textBold }}>{formatMoney(totalValue)}</div>
         </div>
-        <div style={{ background: totalPL >= 0 ? "linear-gradient(135deg, rgba(52,211,153,0.15), rgba(52,211,153,0.05))" : "linear-gradient(135deg, rgba(248,113,113,0.15), rgba(248,113,113,0.05))", borderRadius: 16, padding: 20, border: totalPL >= 0 ? "1px solid rgba(52,211,153,0.2)" : "1px solid rgba(248,113,113,0.2)", boxShadow: t.shadow }}>
+        <div style={{ background: totalPL >= 0 ? "linear-gradient(135deg, rgba(52,211,153,0.15), rgba(52,211,153,0.05))" : "linear-gradient(135deg, rgba(248,113,113,0.15), rgba(248,113,113,0.05))", borderRadius: 16, padding: isMobile ? 14 : 20, border: totalPL >= 0 ? "1px solid rgba(52,211,153,0.2)" : "1px solid rgba(248,113,113,0.2)", boxShadow: t.shadow }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
             {totalPL >= 0 ? <TrendingUp size={18} color="#34d399" /> : <TrendingDown size={18} color="#f87171" />}
             <span style={{ color: t.textMuted, fontSize: 13, fontWeight: 500 }}>Total P&L</span>
           </div>
-          <div style={{ fontSize: 28, fontWeight: 800, color: totalPL >= 0 ? "#34d399" : "#f87171" }}>
+          <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color: totalPL >= 0 ? "#34d399" : "#f87171" }}>
             {formatMoney(totalPL)}
           </div>
           <div style={{ fontSize: 14, color: totalPL >= 0 ? "#34d399" : "#f87171", fontWeight: 600 }}>
             {formatPct(totalPLPct)}
           </div>
         </div>
-        <div style={{ background: "linear-gradient(135deg, rgba(96,165,250,0.15), rgba(96,165,250,0.05))", borderRadius: 16, padding: 20, border: "1px solid rgba(96,165,250,0.2)", boxShadow: t.shadow }}>
+        <div style={{ background: "linear-gradient(135deg, rgba(96,165,250,0.15), rgba(96,165,250,0.05))", borderRadius: 16, padding: isMobile ? 14 : 20, border: "1px solid rgba(96,165,250,0.2)", boxShadow: t.shadow }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
             <DollarSign size={18} color="#60a5fa" />
             <span style={{ color: t.textMuted, fontSize: 13, fontWeight: 500 }}>Total Cost Basis</span>
           </div>
-          <div style={{ fontSize: 28, fontWeight: 800, color: t.textBold }}>{formatMoney(totalCost)}</div>
+          <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color: t.textBold }}>{formatMoney(totalCost)}</div>
         </div>
-        <div style={{ background: "linear-gradient(135deg, rgba(251,191,36,0.15), rgba(251,191,36,0.05))", borderRadius: 16, padding: 20, border: "1px solid rgba(251,191,36,0.2)", boxShadow: t.shadow }}>
+        <div style={{ background: "linear-gradient(135deg, rgba(251,191,36,0.15), rgba(251,191,36,0.05))", borderRadius: 16, padding: isMobile ? 14 : 20, border: "1px solid rgba(251,191,36,0.2)", boxShadow: t.shadow }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
             <BarChart3 size={18} color="#fbbf24" />
             <span style={{ color: t.textMuted, fontSize: 13, fontWeight: 500 }}>Positions</span>
           </div>
-          <div style={{ fontSize: 28, fontWeight: 800, color: t.textBold }}>{filtered.length}</div>
+          <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color: t.textBold }}>{filtered.length}</div>
           <div style={{ fontSize: 14, color: t.textMuted }}>across {selectedAccount === "All" ? "3 accounts" : "1 account"}</div>
         </div>
       </div>
@@ -943,15 +1233,15 @@ export default function App() {
       {spyReturn !== null && (
         <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F4CA}"} Portfolio vs S&P 500</h3>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-around", flexWrap: "wrap", gap: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-around", flexWrap: "wrap", gap: 16, flexDirection: isMobile ? "column" : "row" }}>
             <div style={{ textAlign: "center" }}>
               <div style={{ fontSize: 13, color: t.textMuted, marginBottom: 8, fontWeight: 600 }}>Your Portfolio</div>
-              <div style={{ fontSize: 32, fontWeight: 800, color: totalPLPct >= 0 ? "#34d399" : "#f87171" }}>{formatPct(totalPLPct)}</div>
+              <div style={{ fontSize: isMobile ? 26 : 32, fontWeight: 800, color: totalPLPct >= 0 ? "#34d399" : "#f87171" }}>{formatPct(totalPLPct)}</div>
             </div>
             <div style={{ fontSize: 24, fontWeight: 800, color: t.textDim }}>vs</div>
             <div style={{ textAlign: "center" }}>
               <div style={{ fontSize: 13, color: t.textMuted, marginBottom: 8, fontWeight: 600 }}>S&P 500 (1Y)</div>
-              <div style={{ fontSize: 32, fontWeight: 800, color: spyReturn >= 0 ? "#34d399" : "#f87171" }}>{formatPct(spyReturn)}</div>
+              <div style={{ fontSize: isMobile ? 26 : 32, fontWeight: 800, color: spyReturn >= 0 ? "#34d399" : "#f87171" }}>{formatPct(spyReturn)}</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 20px", borderRadius: 14, background: totalPLPct > spyReturn ? "rgba(52,211,153,0.12)" : "rgba(248,113,113,0.12)", border: `1px solid ${totalPLPct > spyReturn ? "rgba(52,211,153,0.2)" : "rgba(248,113,113,0.2)"}` }}>
               {totalPLPct > spyReturn ? <TrendingUp size={20} color="#34d399" /> : <TrendingDown size={20} color="#f87171" />}
@@ -966,8 +1256,31 @@ export default function App() {
         </div>
       )}
 
+      {/* Achievement Badges */}
+      <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
+        <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F3C5}"} Achievements</h3>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: isMobile ? "center" : "flex-start" }}>
+          {BADGE_DEFS.map(def => {
+            const unlocked = badges[def.key];
+            return (
+              <div key={def.key} title={unlocked ? def.name : def.hint} style={{
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "12px 16px", borderRadius: 14, minWidth: 90, textAlign: "center",
+                background: unlocked ? "rgba(168,139,250,0.1)" : t.hoverBg,
+                border: unlocked ? "1px solid rgba(168,139,250,0.4)" : `1px solid ${t.cardBorder}`,
+                opacity: unlocked ? 1 : 0.4,
+                filter: unlocked ? "none" : "grayscale(1)",
+                transition: "all 0.3s",
+              }}>
+                <span style={{ fontSize: 28 }}>{unlocked ? def.icon : "\u{2753}"}</span>
+                <span style={{ fontSize: 11, fontWeight: 600, color: unlocked ? t.textBold : t.textDim }}>{unlocked ? def.name : "???"}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Charts Row */}
-      <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr 1fr", gap: 16, marginBottom: 24 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "3fr 1fr 1fr", gap: 16, marginBottom: 24 }}>
         {/* Portfolio Value Chart */}
         <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F4C8}"} Portfolio Value</h3>
@@ -1042,7 +1355,7 @@ export default function App() {
       </div>
 
       {/* Best / Worst Performers */}
-      <div style={{ display: "flex", gap: 16, marginBottom: 24 }}>
+      <div style={{ display: "flex", gap: 16, marginBottom: 24, flexDirection: isMobile ? "column" : "row" }}>
         <PerformerCard items={gainers} label="Top Gainers" icon={"\u{1F525}"} />
         <PerformerCard items={losers} label="Top Losers" icon={"\u{1F4C9}"} />
       </div>
@@ -1072,8 +1385,46 @@ export default function App() {
         )}
       </div>
 
+      {/* Correlation Heatmap */}
+      <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
+        <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F50D}"} Correlation Heatmap (30d)</h3>
+        {correlationLoading ? (
+          <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>Loading correlation data...</div>
+        ) : !correlationData ? (
+          <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>Correlation data will load after live prices connect.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <div style={{ display: "grid", gridTemplateColumns: `60px repeat(${correlationData.tickers.length}, 1fr)`, gap: 2, minWidth: Math.max(400, correlationData.tickers.length * 55 + 60) }}>
+              {/* Header row */}
+              <div />
+              {correlationData.tickers.map(tk => (
+                <div key={`h-${tk}`} style={{ fontSize: 10, fontWeight: 700, color: t.textMuted, textAlign: "center", padding: "4px 2px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tk}</div>
+              ))}
+              {/* Data rows */}
+              {correlationData.tickers.map((tk, i) => (
+                <>
+                  <div key={`r-${tk}`} style={{ fontSize: 10, fontWeight: 700, color: t.textMuted, display: "flex", alignItems: "center", padding: "0 4px" }}>{tk}</div>
+                  {correlationData.matrix[i].map((val, j) => {
+                    const absVal = Math.abs(val);
+                    const bg = val >= 0
+                      ? `rgba(52,211,153,${(absVal * 0.6 + 0.05).toFixed(2)})`
+                      : `rgba(248,113,113,${(absVal * 0.6 + 0.05).toFixed(2)})`;
+                    return (
+                      <div key={`c-${i}-${j}`} style={{
+                        background: bg, borderRadius: 4, padding: "6px 2px", textAlign: "center",
+                        fontSize: 10, fontWeight: 600, color: absVal > 0.3 ? "#fff" : t.textMuted,
+                      }}>{val.toFixed(2)}</div>
+                    );
+                  })}
+                </>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* News & Earnings Row */}
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, marginBottom: 24 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "2fr 1fr", gap: 16, marginBottom: 24 }}>
         {/* News Feed */}
         <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text, display: "flex", alignItems: "center", gap: 8 }}>
@@ -1146,7 +1497,7 @@ export default function App() {
       {selectedAccount === "All" && accountBreakdown.length > 0 && (
         <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F3E6}"} Account Breakdown</h3>
-          <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ display: "flex", gap: 12, flexDirection: isMobile ? "column" : "row" }}>
             {accountBreakdown.map((acc) => {
               const pct = totalValue > 0 ? ((acc.value / totalValue) * 100).toFixed(1) : "0";
               return (
@@ -1223,48 +1574,51 @@ export default function App() {
         </div>
 
         {viewMode === "treemap" ? (
-          <div style={{ position: "relative", width: "100%", height: 420, borderRadius: 12, overflow: "hidden" }}>
-            {treemapRects.map((r, i) => {
-              const minDim = Math.min(r.w, r.h);
-              const area = r.w * r.h;
-              const tickerSize = Math.max(8, Math.min(32, minDim * 1.2));
-              const pctSize = Math.max(8, Math.min(22, minDim * 0.85));
-              const valSize = Math.max(8, Math.min(18, minDim * 0.7));
-              const showPct = minDim > 8 && area > 60;
-              const showVal = minDim > 12 && area > 150;
-              return (
-                <div key={i} style={{
-                  position: "absolute",
-                  left: `${r.x}%`,
-                  top: `${r.y}%`,
-                  width: `${r.w}%`,
-                  height: `${r.h}%`,
-                  background: plColor(r.plPct),
-                  border: `1px solid ${themeMode === "dark" ? "rgba(0,0,0,0.3)" : "rgba(255,255,255,0.5)"}`,
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  overflow: "hidden",
-                  cursor: "default",
-                  transition: "opacity 0.2s",
-                  boxSizing: "border-box",
-                  padding: 2,
-                }} title={`${r.ticker}: ${formatMoney(r.value)} (${formatPct(r.plPct)})`}
-                  onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.8"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
-                >
-                  <div style={{ fontWeight: 800, fontSize: tickerSize, color: "#fff", textShadow: "0 1px 3px rgba(0,0,0,0.5)", lineHeight: 1.2, whiteSpace: "nowrap" }}>{r.ticker}</div>
-                  {showPct && <div style={{ fontWeight: 600, fontSize: pctSize, color: "rgba(255,255,255,0.85)", textShadow: "0 1px 2px rgba(0,0,0,0.5)", whiteSpace: "nowrap" }}>{formatPct(r.plPct)}</div>}
-                  {showVal && <div style={{ fontWeight: 500, fontSize: valSize, color: "rgba(255,255,255,0.7)", textShadow: "0 1px 2px rgba(0,0,0,0.5)", marginTop: 1, whiteSpace: "nowrap" }}>{formatMoney(r.value)}</div>}
+          <div style={{ overflowX: isMobile ? "auto" : undefined }}>
+            <div style={{ position: "relative", width: "100%", height: 420, borderRadius: 12, overflow: "hidden", minWidth: isMobile ? 600 : undefined }}>
+              {treemapRects.map((r, i) => {
+                const minDim = Math.min(r.w, r.h);
+                const area = r.w * r.h;
+                const tickerSize = Math.max(8, Math.min(32, minDim * 1.2));
+                const pctSize = Math.max(8, Math.min(22, minDim * 0.85));
+                const valSize = Math.max(8, Math.min(18, minDim * 0.7));
+                const showPct = minDim > 8 && area > 60;
+                const showVal = minDim > 12 && area > 150;
+                return (
+                  <div key={i} style={{
+                    position: "absolute",
+                    left: `${r.x}%`,
+                    top: `${r.y}%`,
+                    width: `${r.w}%`,
+                    height: `${r.h}%`,
+                    background: plColor(r.plPct),
+                    border: `1px solid ${themeMode === "dark" ? "rgba(0,0,0,0.3)" : "rgba(255,255,255,0.5)"}`,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    overflow: "hidden",
+                    cursor: "pointer",
+                    transition: "opacity 0.2s",
+                    boxSizing: "border-box",
+                    padding: 2,
+                  }} title={`${r.ticker}: ${formatMoney(r.value)} (${formatPct(r.plPct)})`}
+                    onClick={() => setTickerModal(r.ticker)}
+                    onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.8"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
+                  >
+                    <div style={{ fontWeight: 800, fontSize: tickerSize, color: "#fff", textShadow: "0 1px 3px rgba(0,0,0,0.5)", lineHeight: 1.2, whiteSpace: "nowrap" }}>{r.ticker}</div>
+                    {showPct && <div style={{ fontWeight: 600, fontSize: pctSize, color: "rgba(255,255,255,0.85)", textShadow: "0 1px 2px rgba(0,0,0,0.5)", whiteSpace: "nowrap" }}>{formatPct(r.plPct)}</div>}
+                    {showVal && <div style={{ fontWeight: 500, fontSize: valSize, color: "rgba(255,255,255,0.7)", textShadow: "0 1px 2px rgba(0,0,0,0.5)", marginTop: 1, whiteSpace: "nowrap" }}>{formatMoney(r.value)}</div>}
+                  </div>
+                );
+              })}
+              {treemapRects.length === 0 && (
+                <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>
+                  No position data to display.
                 </div>
-              );
-            })}
-            {treemapRects.length === 0 && (
-              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>
-                No position data to display.
-              </div>
-            )}
+              )}
+            </div>
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
@@ -1287,7 +1641,7 @@ export default function App() {
                   return (
                     <tr key={p.id} style={{ borderBottom: `1px solid ${t.gridStroke}11`, transition: "background 0.15s" }} onMouseEnter={(e) => (e.currentTarget.style.background = t.hoverBg)} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
                       <td style={{ padding: "12px", fontWeight: 700, color: t.textBold }}>
-                        <span style={{ background: t.tickerBadgeBg, padding: "3px 10px", borderRadius: 8, fontSize: 13 }}>{p.ticker}</span>
+                        <span onClick={() => setTickerModal(p.ticker)} style={{ background: t.tickerBadgeBg, padding: "3px 10px", borderRadius: 8, fontSize: 13, cursor: "pointer" }}>{p.ticker}</span>
                       </td>
                       <td style={{ padding: "12px" }}>
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
@@ -1335,7 +1689,7 @@ export default function App() {
       {/* Add Position Modal */}
       {showAddModal && (
         <div style={{ position: "fixed", inset: 0, background: t.overlayBg, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }} onClick={() => setShowAddModal(false)}>
-          <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: 380, border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+          <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: isMobile ? "95vw" : 380, border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
               <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: t.text }}>{"\u2795"} Add Position</h3>
               <button onClick={() => setShowAddModal(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}><X size={20} /></button>
@@ -1370,7 +1724,7 @@ export default function App() {
       {/* CSV Modal */}
       {showCSVModal && (
         <div style={{ position: "fixed", inset: 0, background: t.overlayBg, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }} onClick={() => setShowCSVModal(false)}>
-          <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: 420, border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+          <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: isMobile ? "95vw" : 420, border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: t.text }}>{"\u{1F4C4}"} Import CSV</h3>
               <button onClick={() => setShowCSVModal(false)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}><X size={20} /></button>
@@ -1395,7 +1749,7 @@ export default function App() {
       {/* Alert Modal */}
       {showAlertModal && (
         <div style={{ position: "fixed", inset: 0, background: t.overlayBg, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }} onClick={() => setShowAlertModal(null)}>
-          <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: 380, border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+          <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: isMobile ? "95vw" : 380, border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
               <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: t.text }}>{"\u{1F514}"} Price Alert — {showAlertModal}</h3>
               <button onClick={() => setShowAlertModal(null)} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}><X size={20} /></button>
@@ -1439,6 +1793,93 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Ticker Detail Modal */}
+      {tickerModal && (() => {
+        const details = getTickerDetails(tickerModal);
+        return (
+          <div style={{ position: "fixed", inset: 0, background: t.overlayBg, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }} onClick={() => { setTickerModal(null); setTickerModalTimeframe("1M"); }}>
+            <div style={{ background: t.modalBg, borderRadius: 20, padding: 28, width: isMobile ? "95vw" : 560, maxHeight: "90vh", overflowY: "auto", border: `1px solid ${t.modalBorder}`, boxShadow: "0 25px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+                <h3 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: t.textBold }}>{tickerModal} <span style={{ fontSize: 13, fontWeight: 500, color: t.textMuted }}>{details.sector}</span></h3>
+                <button onClick={() => { setTickerModal(null); setTickerModalTimeframe("1M"); }} style={{ background: "none", border: "none", color: t.textMuted, cursor: "pointer" }}><X size={20} /></button>
+              </div>
+
+              {/* Stats Grid */}
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
+                <div style={{ background: t.hoverBg, borderRadius: 10, padding: 12, border: `1px solid ${t.cardBorder}` }}>
+                  <div style={{ fontSize: 11, color: t.textDim, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Price</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: t.textBold }}>{formatMoney(details.currentPrice)}</div>
+                </div>
+                <div style={{ background: t.hoverBg, borderRadius: 10, padding: 12, border: `1px solid ${t.cardBorder}` }}>
+                  <div style={{ fontSize: 11, color: t.textDim, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Avg Cost</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: t.textBold }}>{formatMoney(details.avgCost)}</div>
+                </div>
+                <div style={{ background: t.hoverBg, borderRadius: 10, padding: 12, border: `1px solid ${t.cardBorder}`, gridColumn: isMobile ? "1 / -1" : undefined }}>
+                  <div style={{ fontSize: 11, color: t.textDim, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Market Value</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: t.textBold }}>{formatMoney(details.marketValue)}</div>
+                </div>
+              </div>
+
+              {/* P&L Banner */}
+              <div style={{ background: details.pl >= 0 ? "rgba(52,211,153,0.12)" : "rgba(248,113,113,0.12)", borderRadius: 12, padding: "12px 16px", marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${details.pl >= 0 ? "rgba(52,211,153,0.2)" : "rgba(248,113,113,0.2)"}` }}>
+                <span style={{ fontSize: 14, fontWeight: 700, color: details.pl >= 0 ? "#34d399" : "#f87171" }}>{formatMoney(details.pl)}</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: details.pl >= 0 ? "#34d399" : "#f87171" }}>{formatPct(details.plPct)}</span>
+              </div>
+
+              {/* Timeframe Buttons */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+                {["1D", "5D", "1M", "6M", "1Y"].map(tf => (
+                  <button key={tf} onClick={() => setTickerModalTimeframe(tf)} style={{ padding: "6px 14px", borderRadius: 8, border: tickerModalTimeframe === tf ? "none" : `1px solid ${t.pillBorder}`, background: tickerModalTimeframe === tf ? "linear-gradient(135deg, #a78bfa, #f472b6)" : t.pillBg, color: tickerModalTimeframe === tf ? "#fff" : t.textMuted, cursor: "pointer", fontSize: 12, fontWeight: 600, minHeight: isMobile ? 44 : undefined }}>
+                    {tf}
+                  </button>
+                ))}
+              </div>
+
+              {/* Chart */}
+              {candleLoading ? (
+                <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>Loading chart data...</div>
+              ) : !candleData || candleData.length === 0 ? (
+                <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>No chart data available for this timeframe.</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={200}>
+                  <AreaChart data={candleData}>
+                    <defs>
+                      <linearGradient id="tickerGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={details.pl >= 0 ? "#34d399" : "#f87171"} stopOpacity={0.3} />
+                        <stop offset="100%" stopColor={details.pl >= 0 ? "#34d399" : "#f87171"} stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke={t.gridStroke} />
+                    <XAxis dataKey="t" tick={{ fill: t.textDim, fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={(v) => {
+                      const d = new Date(v * 1000);
+                      return tickerModalTimeframe === "1D" || tickerModalTimeframe === "5D"
+                        ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+                        : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                    }} />
+                    <YAxis tick={{ fill: t.textDim, fontSize: 10 }} tickLine={false} axisLine={false} domain={["auto", "auto"]} tickFormatter={(v) => `$${v.toFixed(0)}`} />
+                    <Tooltip contentStyle={{ background: t.tooltipBg, border: `1px solid ${t.tooltipBorder}`, borderRadius: 10, color: t.text, fontSize: 12 }} formatter={(v) => [`$${(v as number).toFixed(2)}`, "Price"]} labelFormatter={(v) => new Date((v as number) * 1000).toLocaleString()} cursor={{ stroke: t.textDim, strokeDasharray: "4 4" }} />
+                    <Area type="monotone" dataKey="c" stroke={details.pl >= 0 ? "#34d399" : "#f87171"} strokeWidth={2} fill="url(#tickerGrad)" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
+
+              {/* Position details */}
+              {details.positions.length > 1 && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ fontSize: 12, color: t.textDim, fontWeight: 600, marginBottom: 8, textTransform: "uppercase" }}>Positions ({details.positions.length})</div>
+                  {details.positions.map(pos => (
+                    <div key={pos.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${t.gridStroke}11`, fontSize: 12 }}>
+                      <span style={{ color: t.textMuted }}>{pos.account}: {pos.shares} shares</span>
+                      <span style={{ color: t.textMuted }}>@ {formatMoney(pos.avgCost)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       <style>{`
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
