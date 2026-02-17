@@ -1225,13 +1225,13 @@ export default function App() {
         {viewMode === "treemap" ? (
           <div style={{ position: "relative", width: "100%", height: 420, borderRadius: 12, overflow: "hidden" }}>
             {treemapRects.map((r, i) => {
+              const minDim = Math.min(r.w, r.h);
               const area = r.w * r.h;
-              const dim = Math.sqrt(area);
-              const tickerSize = Math.max(8, Math.min(28, dim * 0.55));
-              const pctSize = Math.max(8, Math.min(20, dim * 0.38));
-              const valSize = Math.max(8, Math.min(16, dim * 0.3));
-              const showPct = r.w > 5 && r.h > 6 && area > 30;
-              const showVal = r.w > 8 && r.h > 10 && area > 80;
+              const tickerSize = Math.max(8, Math.min(32, minDim * 1.2));
+              const pctSize = Math.max(8, Math.min(22, minDim * 0.85));
+              const valSize = Math.max(8, Math.min(18, minDim * 0.7));
+              const showPct = minDim > 8 && area > 60;
+              const showVal = minDim > 12 && area > 150;
               return (
                 <div key={i} style={{
                   position: "absolute",
