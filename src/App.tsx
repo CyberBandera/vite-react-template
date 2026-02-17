@@ -13,6 +13,11 @@ const FINNHUB_SYMBOLS: Record<string, string> = {
   VTSAX: "VTI",
 };
 
+// Map display tickers to Yahoo Finance symbols when they differ
+const YAHOO_SYMBOLS: Record<string, string> = {
+  BRKB: "BRK-B",
+};
+
 // Multiply Finnhub price to approximate the display ticker's actual price
 const PRICE_MULTIPLIERS: Record<string, number> = {
   VTSAX: 0.487,
@@ -439,69 +444,58 @@ const basePrices: Record<string, number> = {
 // ── Candle Data ──
 
 const fetchCandleData = async (displayTicker: string, timeframe: string): Promise<{ t: number; c: number }[] | null> => {
-  const apiSymbol = FINNHUB_SYMBOLS[displayTicker] || displayTicker;
-  const resolutionMap: Record<string, string> = { "1D": "5", "5D": "15", "1M": "60", "6M": "D", "1Y": "D" };
-  const rangeMap: Record<string, number> = { "1D": 2 * 86400, "5D": 7 * 86400, "1M": 35 * 86400, "6M": 190 * 86400, "1Y": 370 * 86400 };
-  const resolution = resolutionMap[timeframe] || "D";
-  const range = rangeMap[timeframe] || 370 * 86400;
-  const to = Math.floor(Date.now() / 1000);
-  const from = to - range;
-  const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(apiSymbol)}&resolution=${resolution}&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`;
-  console.log(`[Candle] ${displayTicker} (${apiSymbol}) tf=${timeframe} res=${resolution} from=${from} to=${to}`);
+  const yahooSymbol = YAHOO_SYMBOLS[displayTicker] || displayTicker;
+  const intervalMap: Record<string, string> = { "1D": "5m", "5D": "15m", "1M": "1h", "6M": "1d", "1Y": "1d" };
+  const rangeMap: Record<string, string> = { "1D": "1d", "5D": "5d", "1M": "1mo", "6M": "6mo", "1Y": "1y" };
+  const interval = intervalMap[timeframe] || "1d";
+  const range = rangeMap[timeframe] || "1y";
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${interval}&range=${range}`;
+  console.log(`[Candle] ${displayTicker} → Yahoo ${yahooSymbol} tf=${timeframe} interval=${interval} range=${range}`);
   console.log(`[Candle] URL: ${url}`);
   try {
     const res = await fetch(url);
     if (!res.ok) {
       console.warn(`[Candle] ${displayTicker}: HTTP ${res.status} ${res.statusText}`);
-      if (res.status === 429) {
-        console.warn(`[Candle] Rate limited — waiting 2s and retrying...`);
-        await new Promise(r => setTimeout(r, 2000));
-        const retry = await fetch(url);
-        if (!retry.ok) { console.warn(`[Candle] ${displayTicker}: retry also failed HTTP ${retry.status}`); return null; }
-        const retryData = await retry.json();
-        console.log(`[Candle] ${displayTicker} retry response:`, retryData);
-        if (retryData.s !== "ok" || !retryData.t || !retryData.c) return null;
-        const mult = PRICE_MULTIPLIERS[displayTicker] || 1;
-        return retryData.t.map((time: number, i: number) => ({ t: time, c: retryData.c[i] * mult }));
-      }
       return null;
     }
     const data = await res.json();
-    console.log(`[Candle] ${displayTicker} response: s=${data.s}, points=${data.t?.length ?? 0}`, data.s !== "ok" ? data : "");
-    if (data.s !== "ok" || !data.t || !data.c) return null;
-    const mult = PRICE_MULTIPLIERS[displayTicker] || 1;
-    return data.t.map((time: number, i: number) => ({ t: time, c: data.c[i] * mult }));
+    const result = data?.chart?.result?.[0];
+    if (!result || !result.timestamp || !result.indicators?.quote?.[0]?.close) {
+      console.warn(`[Candle] ${displayTicker}: no data in response`, data?.chart?.error || data);
+      return null;
+    }
+    const timestamps: number[] = result.timestamp;
+    const closes: (number | null)[] = result.indicators.quote[0].close;
+    console.log(`[Candle] ${displayTicker}: ${timestamps.length} points received`);
+    const points: { t: number; c: number }[] = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      if (closes[i] != null) points.push({ t: timestamps[i], c: closes[i] as number });
+    }
+    return points.length > 0 ? points : null;
   } catch (err) { console.error(`[Candle] ${displayTicker}: fetch error`, err); return null; }
 };
 
 // ── Correlation Helpers ──
 
 const fetchRawCandles = async (displayTicker: string): Promise<number[] | null> => {
-  const apiSymbol = FINNHUB_SYMBOLS[displayTicker] || displayTicker;
-  const to = Math.floor(Date.now() / 1000);
-  const from = to - 35 * 86400;
-  const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(apiSymbol)}&resolution=D&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`;
-  console.log(`[Correlation] Fetching ${displayTicker} (${apiSymbol})`);
+  const yahooSymbol = YAHOO_SYMBOLS[displayTicker] || displayTicker;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=1mo`;
+  console.log(`[Correlation] Fetching ${displayTicker} → Yahoo ${yahooSymbol}`);
   try {
     const res = await fetch(url);
     if (!res.ok) {
-      console.warn(`[Correlation] ${displayTicker}: HTTP ${res.status}`);
-      if (res.status === 429) {
-        console.warn(`[Correlation] Rate limited — waiting 2s and retrying...`);
-        await new Promise(r => setTimeout(r, 2000));
-        const retry = await fetch(url);
-        if (!retry.ok) { console.warn(`[Correlation] ${displayTicker}: retry failed HTTP ${retry.status}`); return null; }
-        const retryData = await retry.json();
-        console.log(`[Correlation] ${displayTicker} retry: s=${retryData.s}, points=${retryData.c?.length ?? 0}`);
-        if (retryData.s !== "ok" || !retryData.c) return null;
-        return retryData.c;
-      }
+      console.warn(`[Correlation] ${displayTicker}: HTTP ${res.status} ${res.statusText}`);
       return null;
     }
     const data = await res.json();
-    console.log(`[Correlation] ${displayTicker}: s=${data.s}, points=${data.c?.length ?? 0}`);
-    if (data.s !== "ok" || !data.c) return null;
-    return data.c;
+    const result = data?.chart?.result?.[0];
+    if (!result || !result.indicators?.quote?.[0]?.close) {
+      console.warn(`[Correlation] ${displayTicker}: no data`, data?.chart?.error || data);
+      return null;
+    }
+    const closes = (result.indicators.quote[0].close as (number | null)[]).filter((v): v is number => v != null);
+    console.log(`[Correlation] ${displayTicker}: ${closes.length} daily closes`);
+    return closes.length > 0 ? closes : null;
   } catch (err) { console.error(`[Correlation] ${displayTicker}: fetch error`, err); return null; }
 };
 
@@ -907,7 +901,7 @@ export default function App() {
     setCandleLoading(true);
     setCandleData(null);
     console.log(`[TickerModal] Opening ${tickerModal}, timeframe=${tickerModalTimeframe}`);
-    // Small delay to avoid colliding with other Finnhub requests
+    // Small delay to stagger requests
     const timer = setTimeout(async () => {
       const data = await fetchCandleData(tickerModal, tickerModalTimeframe);
       if (!cancelled) {
@@ -920,9 +914,33 @@ export default function App() {
   }, [tickerModal, tickerModalTimeframe]);
 
   // ── Correlation Heatmap ──
+  const CORRELATION_KEY = "portfolio-correlation";
   const correlationFetched = useRef(false);
+
+  // Load cached correlation on mount
   useEffect(() => {
-    if (correlationFetched.current || dataSource !== "live") return;
+    try {
+      const cached = localStorage.getItem(CORRELATION_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        const cacheAge = Date.now() - (parsed._ts || 0);
+        // Use cache if less than 24 hours old
+        if (cacheAge < 24 * 60 * 60 * 1000 && parsed.tickers?.length > 0 && parsed.matrix?.length > 0) {
+          console.log(`[Correlation] Loaded from cache (${(cacheAge / 3600000).toFixed(1)}h old), ${parsed.tickers.length} tickers`);
+          setCorrelationData({ tickers: parsed.tickers, matrix: parsed.matrix });
+          correlationFetched.current = true;
+          return;
+        }
+        console.log(`[Correlation] Cache expired (${(cacheAge / 3600000).toFixed(1)}h old), will refetch`);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (correlationFetched.current) return;
+    // Wait for prices to load (any source) before determining top tickers
+    const hasPrices = positions.some(p => prices[p.ticker]?.current > 0);
+    if (!hasPrices) return;
     const tickerValues: Record<string, number> = {};
     positions.forEach(p => {
       const value = (prices[p.ticker]?.current || 0) * p.shares;
@@ -936,7 +954,7 @@ export default function App() {
     correlationFetched.current = true;
     setCorrelationLoading(true);
     const doFetch = async () => {
-      console.log(`[Correlation] Starting fetch for ${topTickers.length} tickers:`, topTickers);
+      console.log(`[Correlation] Starting Yahoo Finance fetch for ${topTickers.length} tickers:`, topTickers);
       const candlesMap: Record<string, number[]> = {};
       for (let idx = 0; idx < topTickers.length; idx++) {
         const ticker = topTickers[idx];
@@ -947,6 +965,11 @@ export default function App() {
       }
       const validTickers = topTickers.filter(tk => candlesMap[tk]);
       console.log(`[Correlation] Got data for ${validTickers.length}/${topTickers.length} tickers:`, validTickers);
+      if (validTickers.length < 2) {
+        console.warn(`[Correlation] Not enough data to compute matrix`);
+        setCorrelationLoading(false);
+        return;
+      }
       const returnsMap: Record<string, number[]> = {};
       validTickers.forEach(tk => { returnsMap[tk] = computeDailyReturns(candlesMap[tk]); });
       const matrix: number[][] = [];
@@ -957,11 +980,15 @@ export default function App() {
         }
         matrix.push(row);
       }
-      setCorrelationData({ tickers: validTickers, matrix });
+      const result = { tickers: validTickers, matrix };
+      setCorrelationData(result);
       setCorrelationLoading(false);
+      // Cache to localStorage
+      try { localStorage.setItem(CORRELATION_KEY, JSON.stringify({ ...result, _ts: Date.now() })); } catch {}
+      console.log(`[Correlation] Matrix computed and cached for ${validTickers.length} tickers`);
     };
     doFetch();
-  }, [dataSource, positions, prices]);
+  }, [positions, prices]);
 
   // ── Ticker Detail Helper ──
   const getTickerDetails = useCallback((ticker: string) => {
