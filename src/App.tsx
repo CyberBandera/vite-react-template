@@ -1224,32 +1224,42 @@ export default function App() {
 
         {viewMode === "treemap" ? (
           <div style={{ position: "relative", width: "100%", height: 420, borderRadius: 12, overflow: "hidden" }}>
-            {treemapRects.map((r, i) => (
-              <div key={i} style={{
-                position: "absolute",
-                left: `${r.x}%`,
-                top: `${r.y}%`,
-                width: `${r.w}%`,
-                height: `${r.h}%`,
-                background: plColor(r.plPct),
-                border: `1px solid ${themeMode === "dark" ? "rgba(0,0,0,0.3)" : "rgba(255,255,255,0.5)"}`,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                overflow: "hidden",
-                cursor: "default",
-                transition: "opacity 0.2s",
-                boxSizing: "border-box",
-              }} title={`${r.ticker}: ${formatMoney(r.value)} (${formatPct(r.plPct)})`}
-                onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.8"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
-              >
-                {r.w > 6 && <div style={{ fontWeight: 800, fontSize: r.w > 15 ? 18 : r.w > 10 ? 14 : 11, color: "#fff", textShadow: "0 1px 3px rgba(0,0,0,0.5)", lineHeight: 1.2 }}>{r.ticker}</div>}
-                {r.w > 8 && <div style={{ fontWeight: 600, fontSize: r.w > 15 ? 14 : 11, color: "rgba(255,255,255,0.85)", textShadow: "0 1px 2px rgba(0,0,0,0.5)" }}>{formatPct(r.plPct)}</div>}
-                {r.w > 15 && <div style={{ fontWeight: 500, fontSize: 11, color: "rgba(255,255,255,0.7)", textShadow: "0 1px 2px rgba(0,0,0,0.5)", marginTop: 2 }}>{formatMoney(r.value)}</div>}
-              </div>
-            ))}
+            {treemapRects.map((r, i) => {
+              const area = r.w * r.h;
+              const dim = Math.sqrt(area);
+              const tickerSize = Math.max(8, Math.min(28, dim * 0.55));
+              const pctSize = Math.max(8, Math.min(20, dim * 0.38));
+              const valSize = Math.max(8, Math.min(16, dim * 0.3));
+              const showPct = r.w > 5 && r.h > 6 && area > 30;
+              const showVal = r.w > 8 && r.h > 10 && area > 80;
+              return (
+                <div key={i} style={{
+                  position: "absolute",
+                  left: `${r.x}%`,
+                  top: `${r.y}%`,
+                  width: `${r.w}%`,
+                  height: `${r.h}%`,
+                  background: plColor(r.plPct),
+                  border: `1px solid ${themeMode === "dark" ? "rgba(0,0,0,0.3)" : "rgba(255,255,255,0.5)"}`,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  overflow: "hidden",
+                  cursor: "default",
+                  transition: "opacity 0.2s",
+                  boxSizing: "border-box",
+                  padding: 2,
+                }} title={`${r.ticker}: ${formatMoney(r.value)} (${formatPct(r.plPct)})`}
+                  onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.8"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
+                >
+                  <div style={{ fontWeight: 800, fontSize: tickerSize, color: "#fff", textShadow: "0 1px 3px rgba(0,0,0,0.5)", lineHeight: 1.2, whiteSpace: "nowrap" }}>{r.ticker}</div>
+                  {showPct && <div style={{ fontWeight: 600, fontSize: pctSize, color: "rgba(255,255,255,0.85)", textShadow: "0 1px 2px rgba(0,0,0,0.5)", whiteSpace: "nowrap" }}>{formatPct(r.plPct)}</div>}
+                  {showVal && <div style={{ fontWeight: 500, fontSize: valSize, color: "rgba(255,255,255,0.7)", textShadow: "0 1px 2px rgba(0,0,0,0.5)", marginTop: 1, whiteSpace: "nowrap" }}>{formatMoney(r.value)}</div>}
+                </div>
+              );
+            })}
             {treemapRects.length === 0 && (
               <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>
                 No position data to display.
