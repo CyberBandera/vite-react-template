@@ -441,19 +441,37 @@ const basePrices: Record<string, number> = {
 const fetchCandleData = async (displayTicker: string, timeframe: string): Promise<{ t: number; c: number }[] | null> => {
   const apiSymbol = FINNHUB_SYMBOLS[displayTicker] || displayTicker;
   const resolutionMap: Record<string, string> = { "1D": "5", "5D": "15", "1M": "60", "6M": "D", "1Y": "D" };
-  const rangeMap: Record<string, number> = { "1D": 86400, "5D": 5 * 86400, "1M": 30 * 86400, "6M": 180 * 86400, "1Y": 365 * 86400 };
+  const rangeMap: Record<string, number> = { "1D": 2 * 86400, "5D": 7 * 86400, "1M": 35 * 86400, "6M": 190 * 86400, "1Y": 370 * 86400 };
   const resolution = resolutionMap[timeframe] || "D";
-  const range = rangeMap[timeframe] || 365 * 86400;
+  const range = rangeMap[timeframe] || 370 * 86400;
   const to = Math.floor(Date.now() / 1000);
   const from = to - range;
+  const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(apiSymbol)}&resolution=${resolution}&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`;
+  console.log(`[Candle] ${displayTicker} (${apiSymbol}) tf=${timeframe} res=${resolution} from=${from} to=${to}`);
+  console.log(`[Candle] URL: ${url}`);
   try {
-    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(apiSymbol)}&resolution=${resolution}&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`);
-    if (!res.ok) return null;
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn(`[Candle] ${displayTicker}: HTTP ${res.status} ${res.statusText}`);
+      if (res.status === 429) {
+        console.warn(`[Candle] Rate limited — waiting 2s and retrying...`);
+        await new Promise(r => setTimeout(r, 2000));
+        const retry = await fetch(url);
+        if (!retry.ok) { console.warn(`[Candle] ${displayTicker}: retry also failed HTTP ${retry.status}`); return null; }
+        const retryData = await retry.json();
+        console.log(`[Candle] ${displayTicker} retry response:`, retryData);
+        if (retryData.s !== "ok" || !retryData.t || !retryData.c) return null;
+        const mult = PRICE_MULTIPLIERS[displayTicker] || 1;
+        return retryData.t.map((time: number, i: number) => ({ t: time, c: retryData.c[i] * mult }));
+      }
+      return null;
+    }
     const data = await res.json();
+    console.log(`[Candle] ${displayTicker} response: s=${data.s}, points=${data.t?.length ?? 0}`, data.s !== "ok" ? data : "");
     if (data.s !== "ok" || !data.t || !data.c) return null;
     const mult = PRICE_MULTIPLIERS[displayTicker] || 1;
     return data.t.map((time: number, i: number) => ({ t: time, c: data.c[i] * mult }));
-  } catch { return null; }
+  } catch (err) { console.error(`[Candle] ${displayTicker}: fetch error`, err); return null; }
 };
 
 // ── Correlation Helpers ──
@@ -461,14 +479,30 @@ const fetchCandleData = async (displayTicker: string, timeframe: string): Promis
 const fetchRawCandles = async (displayTicker: string): Promise<number[] | null> => {
   const apiSymbol = FINNHUB_SYMBOLS[displayTicker] || displayTicker;
   const to = Math.floor(Date.now() / 1000);
-  const from = to - 30 * 86400;
+  const from = to - 35 * 86400;
+  const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(apiSymbol)}&resolution=D&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`;
+  console.log(`[Correlation] Fetching ${displayTicker} (${apiSymbol})`);
   try {
-    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(apiSymbol)}&resolution=D&from=${from}&to=${to}&token=${FINNHUB_API_KEY}`);
-    if (!res.ok) return null;
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn(`[Correlation] ${displayTicker}: HTTP ${res.status}`);
+      if (res.status === 429) {
+        console.warn(`[Correlation] Rate limited — waiting 2s and retrying...`);
+        await new Promise(r => setTimeout(r, 2000));
+        const retry = await fetch(url);
+        if (!retry.ok) { console.warn(`[Correlation] ${displayTicker}: retry failed HTTP ${retry.status}`); return null; }
+        const retryData = await retry.json();
+        console.log(`[Correlation] ${displayTicker} retry: s=${retryData.s}, points=${retryData.c?.length ?? 0}`);
+        if (retryData.s !== "ok" || !retryData.c) return null;
+        return retryData.c;
+      }
+      return null;
+    }
     const data = await res.json();
+    console.log(`[Correlation] ${displayTicker}: s=${data.s}, points=${data.c?.length ?? 0}`);
     if (data.s !== "ok" || !data.c) return null;
     return data.c;
-  } catch { return null; }
+  } catch (err) { console.error(`[Correlation] ${displayTicker}: fetch error`, err); return null; }
 };
 
 const computeDailyReturns = (closes: number[]): number[] => {
@@ -869,12 +903,20 @@ export default function App() {
   // ── Candle Data Fetching ──
   useEffect(() => {
     if (!tickerModal) return;
+    let cancelled = false;
     setCandleLoading(true);
     setCandleData(null);
-    fetchCandleData(tickerModal, tickerModalTimeframe).then(data => {
-      setCandleData(data);
-      setCandleLoading(false);
-    });
+    console.log(`[TickerModal] Opening ${tickerModal}, timeframe=${tickerModalTimeframe}`);
+    // Small delay to avoid colliding with other Finnhub requests
+    const timer = setTimeout(async () => {
+      const data = await fetchCandleData(tickerModal, tickerModalTimeframe);
+      if (!cancelled) {
+        console.log(`[TickerModal] ${tickerModal} chart data: ${data ? data.length + " points" : "null"}`);
+        setCandleData(data);
+        setCandleLoading(false);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [tickerModal, tickerModalTimeframe]);
 
   // ── Correlation Heatmap ──
@@ -894,13 +936,17 @@ export default function App() {
     correlationFetched.current = true;
     setCorrelationLoading(true);
     const doFetch = async () => {
+      console.log(`[Correlation] Starting fetch for ${topTickers.length} tickers:`, topTickers);
       const candlesMap: Record<string, number[]> = {};
-      for (const ticker of topTickers) {
+      for (let idx = 0; idx < topTickers.length; idx++) {
+        const ticker = topTickers[idx];
+        console.log(`[Correlation] Fetching ${idx + 1}/${topTickers.length}: ${ticker}`);
         const closes = await fetchRawCandles(ticker);
         if (closes) candlesMap[ticker] = closes;
-        await new Promise(r => setTimeout(r, 300));
+        if (idx < topTickers.length - 1) await new Promise(r => setTimeout(r, 500));
       }
       const validTickers = topTickers.filter(tk => candlesMap[tk]);
+      console.log(`[Correlation] Got data for ${validTickers.length}/${topTickers.length} tickers:`, validTickers);
       const returnsMap: Record<string, number[]> = {};
       validTickers.forEach(tk => { returnsMap[tk] = computeDailyReturns(candlesMap[tk]); });
       const matrix: number[][] = [];
@@ -1389,7 +1435,10 @@ export default function App() {
       <div style={{ background: t.cardBg, borderRadius: 16, padding: 20, border: `1px solid ${t.cardBorder}`, marginBottom: 24, boxShadow: t.shadow }}>
         <h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: t.text }}>{"\u{1F50D}"} Correlation Heatmap (30d)</h3>
         {correlationLoading ? (
-          <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>Loading correlation data...</div>
+          <div style={{ height: 180, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, color: t.textDim, fontSize: 13 }}>
+            <div style={{ width: 28, height: 28, border: `3px solid ${t.cardBorder}`, borderTopColor: "#a78bfa", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+            Loading correlation data...
+          </div>
         ) : !correlationData ? (
           <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>Correlation data will load after live prices connect.</div>
         ) : (
@@ -1838,7 +1887,10 @@ export default function App() {
 
               {/* Chart */}
               {candleLoading ? (
-                <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>Loading chart data...</div>
+                <div style={{ height: 200, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, color: t.textDim, fontSize: 13 }}>
+                  <div style={{ width: 28, height: 28, border: `3px solid ${t.cardBorder}`, borderTopColor: "#a78bfa", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                  Loading chart data...
+                </div>
               ) : !candleData || candleData.length === 0 ? (
                 <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: t.textDim, fontSize: 13 }}>No chart data available for this timeframe.</div>
               ) : (
@@ -1884,6 +1936,7 @@ export default function App() {
       <style>{`
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
         @keyframes mood-bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         * { box-sizing: border-box; }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
