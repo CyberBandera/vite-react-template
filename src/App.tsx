@@ -363,6 +363,30 @@ const saveDailyPLEntry = (value: number, tickerValues: Record<string, number>) =
   } catch {}
 };
 
+// ── Purge bad simulated data on load ──
+// Total cost basis ~$195,132 — any daily value > 2x that is bad simulated data
+const SANE_MAX = 195132 * 2;
+const DATA_CLEANED_KEY = "portfolio-data-cleaned-v1";
+(() => {
+  try {
+    if (localStorage.getItem(DATA_CLEANED_KEY)) return;
+    // Clear daily P&L and per-ticker data (start fresh)
+    localStorage.removeItem(PL_KEY);
+    localStorage.removeItem(PL_TICKERS_KEY);
+    // Sanitize portfolio history — remove any entry above the sane max
+    const hist = loadHistory();
+    let changed = false;
+    for (const [date, val] of Object.entries(hist)) {
+      if (val > SANE_MAX) { delete hist[date]; changed = true; }
+    }
+    if (changed) localStorage.setItem(HISTORY_KEY, JSON.stringify(hist));
+    // Reset ATH if it's bad
+    const ath = loadATH();
+    if (ath > SANE_MAX) localStorage.removeItem(ATH_KEY);
+    localStorage.setItem(DATA_CLEANED_KEY, "1");
+  } catch {}
+})();
+
 const ALERTS_KEY = "portfolio-alerts";
 const loadAlerts = (): PriceAlert[] => {
   try { const s = localStorage.getItem(ALERTS_KEY); if (s) return JSON.parse(s); } catch {}
